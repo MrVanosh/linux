@@ -4436,3 +4436,5 @@
 		status = "disabled";
 	};
 };
+/* Daily tree only: the private additions (t6040-j616s-m4.dtsi), applied last. */
+#include "t6040-j616s-m4.dtsi"
