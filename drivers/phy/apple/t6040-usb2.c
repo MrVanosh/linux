@@ -1515,15 +1515,6 @@ static int t6040_dp_mux_set(struct typec_mux_dev *mux, struct typec_mux_state *s
 	return 0;
 }
 
-/* For the DCP's Type-C route: is this PHY's port in DP alt mode (C/E)? */
-bool apple_t6040_phy_dp_alt(struct phy *phy)
-{
-	struct t6040_usb2_phy *tphy = phy_get_drvdata(phy);
-
-	return tphy && tphy->dp_alt;
-}
-EXPORT_SYMBOL_GPL(apple_t6040_phy_dp_alt);
-
 static void t6040_dp_mux_unregister(void *mux)
 {
 	typec_mux_unregister(mux);
