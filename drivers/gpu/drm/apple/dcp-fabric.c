@@ -9,6 +9,7 @@
 #include <linux/mux/driver.h>
 #include <linux/of_device.h>
 #include <linux/of_graph.h>
+#include <linux/phy/phy.h>
 #include <linux/slab.h>
 #include <linux/soc/apple/dp-tunnel.h>
 #include <linux/usb/typec_altmode.h>
@@ -306,6 +307,54 @@ static int dcp_dpxbar_tunnel_select_source(struct mux_control *mux, int state)
 	return ret;
 }
 
+/*
+ * Desktop 26.x firmware does not power the DP PHY of a Type-C route itself:
+ * the route does, once its crossbar points at the pipeline, and gives it
+ * back before the crossbar is released.
+ */
+static int dcp_typec_route_phy_on(struct apple_dcp_typec_route *route)
+{
+	int ret;
+
+	if (route->dcp->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP ||
+	    route->phy_powered)
+		return 0;
+	ret = phy_init(route->phy);
+	if (!ret) {
+		ret = phy_power_on(route->phy);
+		if (ret)
+			phy_exit(route->phy);
+	}
+	if (ret) {
+		dev_warn(route->dcp->dev, "Type-C DP PHY init/power: %d\n", ret);
+		return ret;
+	}
+	route->phy_powered = true;
+	msleep(25);
+	return 0;
+}
+
+/*
+ * The PHY is powered when the display connects, not when the route is
+ * claimed: the port controller's mode switches run in connector order, and
+ * the PHY must have seen DP alt mode and the plug orientation first.
+ */
+int dcp_typec_phy_on(struct apple_dcp *dcp)
+{
+	struct apple_dcp_typec_route *route = READ_ONCE(dcp->active_typec_route);
+
+	return route ? dcp_typec_route_phy_on(route) : 0;
+}
+
+static void dcp_typec_route_phy_off(struct apple_dcp_typec_route *route)
+{
+	if (!route->phy_powered)
+		return;
+	route->phy_powered = false;
+	phy_power_off(route->phy);
+	phy_exit(route->phy);
+}
+
 static int dcp_typec_route_activate(struct apple_dcp_typec_route *route,
 				    struct mux_control *xbar)
 {
@@ -370,6 +419,12 @@ static int dcp_typec_route_activate(struct apple_dcp_typec_route *route,
 	dcp_modes_begin_attachment(dcp);
 	apple_connector_edid_set_live(dcp->connector, false);
 	dcp->phy = route->phy;
+	/*
+	 * Desktop 26.x compact DPTX takes the crossbar link down and up around
+	 * a link configuration (dptxport_compact_xbar_link()) through dcp->xbar.
+	 */
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP)
+		dcp->xbar = route->xbar;
 	dcp->dptx_phy = route->dptx_phy;
 	dcp->connector_type = DRM_MODE_CONNECTOR_USB;
 	WRITE_ONCE(dcp->ext_backlight, false);
@@ -444,6 +499,7 @@ static int dcp_typec_route_deactivate(struct apple_dcp_typec_route *route)
 		if (route->deactivate_error)
 			return route->deactivate_error;
 		if (!route->deactivate_xbar_done) {
+			dcp_typec_route_phy_off(route);
 			if (!route->tunnel || route->xbar_up)
 				ret = mux_control_deselect(route->active_xbar ?: route->xbar);
 			else
@@ -546,8 +602,15 @@ static int dcp_typec_route_deactivate(struct apple_dcp_typec_route *route)
 			dcp->dptx_phy = dcp->typec_routes[0].dptx_phy;
 		}
 	} else {
-		/* Keep DPTX endpoint discovery working before a cable is attached. */
-		dcp->phy = dcp->typec_routes[0].phy;
+		/*
+		 * Keep DPTX endpoint discovery working before a cable is
+		 * attached. Desktop 26.x powers the PHY with the route, so an
+		 * idle pipeline must not point at one.
+		 */
+		dcp->phy = dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP ?
+			   NULL : dcp->typec_routes[0].phy;
+		if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP)
+			dcp->xbar = NULL;
 		dcp->dptx_phy = dcp->typec_routes[0].dptx_phy;
 		dcp->connector_type = DRM_MODE_CONNECTOR_USB;
 	}
@@ -1519,6 +1582,17 @@ static int dcp_typec_route_set(struct typec_mux_dev *mux,
 			port->applied_valid = true;
 			return 0;
 		}
+	}
+
+	/*
+	 * Desktop 26.x has one Type-C pipeline: only a port with a sink (HPD)
+	 * takes it. A dock or cable in DP alt mode without a display behind it
+	 * would otherwise hold it against the port that has one.
+	 */
+	if (!port->owner && !hpd &&
+	    route->dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP) {
+		port->applied_valid = true;
+		return 0;
 	}
 
 	if (!port->owner) {
