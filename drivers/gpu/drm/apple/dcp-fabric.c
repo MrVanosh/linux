@@ -345,9 +345,23 @@ static int dcp_typec_route_phy_on(struct apple_dcp_typec_route *route)
  */
 int dcp_typec_phy_on(struct apple_dcp *dcp)
 {
-	struct apple_dcp_typec_route *route = READ_ONCE(dcp->active_typec_route);
+	struct apple_dcp_typec_route *route;
 
-	return route ? dcp_typec_route_phy_on(route) : 0;
+	/*
+	 * Ordered against dcp_typec_route_deactivate(), which powers the PHY
+	 * off and releases the crossbar under tb_lock: a connect racing the
+	 * release either powers the PHY first and has it taken down again, or
+	 * finds the route released and powers nothing. A desktop connect does
+	 * not take the fabric lock, so tb_lock is the common one.
+	 */
+	guard(mutex)(&dcp->tb_lock);
+	route = READ_ONCE(dcp->active_typec_route);
+	if (!route)
+		return 0;
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP &&
+	    route->deactivate_xbar_done)
+		return -ENODEV;
+	return dcp_typec_route_phy_on(route);
 }
 
 static void dcp_typec_route_phy_off(struct apple_dcp_typec_route *route)
@@ -428,7 +442,7 @@ static int dcp_typec_route_activate(struct apple_dcp_typec_route *route,
 	 * a link configuration (dptxport_compact_xbar_link()) through dcp->xbar.
 	 */
 	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP)
-		dcp->xbar = route->xbar;
+		WRITE_ONCE(dcp->xbar, route->xbar);
 	dcp->dptx_phy = route->dptx_phy;
 	dcp->connector_type = DRM_MODE_CONNECTOR_USB;
 	WRITE_ONCE(dcp->ext_backlight, false);
@@ -614,7 +628,7 @@ static int dcp_typec_route_deactivate(struct apple_dcp_typec_route *route)
 		dcp->phy = dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP ?
 			   NULL : dcp->typec_routes[0].phy;
 		if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP)
-			dcp->xbar = NULL;
+			WRITE_ONCE(dcp->xbar, NULL);
 		dcp->dptx_phy = dcp->typec_routes[0].dptx_phy;
 		dcp->connector_type = DRM_MODE_CONNECTOR_USB;
 	}
@@ -1508,6 +1522,23 @@ static int dcp_typec_route_set(struct typec_mux_dev *mux,
 			/* H17P external pipes keep their own stop recovery, as before. */
 			if (ret && !dcp_is_external_h17p(dcp))
 				return ret;
+		}
+		/*
+		 * Desktop 26.x has one Type-C pipeline and powers the PHY with
+		 * the route. A sink that went away while the port stays in DP
+		 * alt mode (a dock whose monitor was unplugged) must give back
+		 * the pipeline, its crossbar and the PHY, or a display on
+		 * another port is refused as busy. The route is taken again
+		 * when HPD returns.
+		 */
+		if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP) {
+			port->preferred_route = port->owner;
+			port->hpd = false;
+			ret = dcp_typec_route_deactivate(port->owner);
+			if (ret)
+				return ret;
+			port->owner = NULL;
+			dcp_typec_pipeline_freed();
 		}
 	}
 
