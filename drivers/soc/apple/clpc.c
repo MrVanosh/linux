@@ -462,11 +462,6 @@ static int apple_clpc_resume(struct device *dev)
 static DEFINE_SIMPLE_DEV_PM_OPS(apple_clpc_pm_ops, apple_clpc_suspend,
 				apple_clpc_resume);
 
-/*
- * T8140: DCS states 0-4 on rail 0, fabric states 0-3 on rail 1. A busy
- * cluster raises the DCS one state per frequency quartile and leaves the
- * fabric alone.
- */
 /* Only the stock M5/F3 busy floor is qualified on T8132. Do not invent
  * intermediate frequency-to-memory tables; idle can still release the vote.
  */
@@ -479,12 +474,26 @@ static const struct apple_clpc_hw apple_clpc_hw_t8132 = {
 	.gpu_demand = true,
 };
 
+/*
+ * T8140: DCS states 0-4 on rail 0, fabric states 0-3 on rail 1. A busy
+ * cluster raises the DCS one state per frequency quartile; only a cluster
+ * at its top quartile also raises the fabric.
+ *
+ * GPU work needs both rails at their top states: the GPU firmware takes up
+ * and completes every command over the fabric. With the fabric left at
+ * state 0, light GPU submissions take 30-50% longer than at state 3, and
+ * macOS holds the fabric at its top states while such work streams. The
+ * graphics power state is on only while the GPU has work (the firmware
+ * powers it off when idle), so the floor follows GPU activity and is
+ * released HOLD_MS after it stops.
+ */
 static const struct apple_clpc_hw apple_clpc_hw_t8140 = {
 	.rail = { [APPLE_CLPC_DCS] = 0, [APPLE_CLPC_SOC] = 1 },
 	.map = {
 		[APPLE_CLPC_DCS] = { 1, 2, 3, 4 },
-		[APPLE_CLPC_SOC] = { 0, 0, 0, 0 },
+		[APPLE_CLPC_SOC] = { 0, 0, 0, 3 },
 	},
+	.gpu_demand = true,
 };
 
 /*
