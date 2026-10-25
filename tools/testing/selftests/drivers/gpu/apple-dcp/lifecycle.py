@@ -1879,6 +1879,9 @@ static unsigned acks, case_tag;
 static struct dcp_channel *dcp_get_channel(struct apple_dcp *d, enum dcp_context_id c)
 { (void)c; return &d->channel; }
 static int dcp_parse_tag(char *p) { (void)p; return case_tag; }
+/* A desktop 26.6 callback is not under test here: no scenario selects that firmware. */
+static bool __attribute__((unused)) iomfb_check_callback_v26_6_desktop(int tag, u32 in_len, u32 out_len)
+{ (void)tag; (void)in_len; (void)out_len; assert(!"desktop 26.6 callback in an H17P scenario"); return false; }
 static bool of_machine_is_compatible(const char *n) { (void)n; return machine; }
 static bool of_device_is_compatible(struct device_node *n, const char *s)
 { (void)s; return n->external; }
