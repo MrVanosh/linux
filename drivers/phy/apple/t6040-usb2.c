@@ -237,6 +237,9 @@ struct t6040_usb2_phy {
 	struct completion app_reply;
 	enum typec_orientation orientation;
 	bool usb3_up;		/* tuned by the coprocessor this power cycle */
+	bool usb3_on;		/* dwc3 holds the USB3 phy powered on */
+	bool usb3_pipe;		/* dwc3 asked for the PIPE switch this power cycle */
+	bool usb3_lent;		/* DP mode took the lanes of this Type-C port */
 	bool pipe_switched;	/* the controller's PIPE runs on this PHY */
 
 	/* DisplayPort (PHY mode 3); dp_ok is false when the DT lacks a DP route */
@@ -888,15 +891,19 @@ static void t6040_usb3_pipe_park(struct t6040_usb2_phy *tphy)
  * its PIPE on the dummy PHY. A failure here leaves the port at USB2, so it is
  * logged and not returned: the USB2 PHY and the core must still come up.
  */
-static int t6040_usb3_power_on(struct phy *phy)
+static void t6040_usb3_up_locked(struct t6040_usb2_phy *tphy)
 {
-	struct t6040_usb2_phy *tphy = phy_get_drvdata(phy);
 	bool swap;
 	int ret;
 
-	guard(mutex)(&tphy->lock);
+	lockdep_assert_held(&tphy->lock);
 	if (!tphy->usb3_ok || tphy->usb3_up)
-		return 0;
+		return;
+	/* DP mode owns all four lanes; USB3 comes back in t6040_usb3_reclaim_locked(). */
+	if (tphy->dp_up) {
+		dev_dbg(tphy->dev, "USB3: lanes held by DP, USB2 only for now\n");
+		return;
+	}
 
 	switch (tphy->orientation) {
 	case TYPEC_ORIENTATION_NORMAL:
@@ -907,7 +914,7 @@ static int t6040_usb3_power_on(struct phy *phy)
 		break;
 	default:
 		dev_info(tphy->dev, "USB3: no plug orientation, USB2 only\n");
-		return 0;
+		return;
 	}
 
 	/* PIPE_HANDLER_DEFAULT: the dummy PIPE clock the controller keeps using at USB2 */
@@ -924,7 +931,7 @@ static int t6040_usb3_power_on(struct phy *phy)
 
 	tphy->usb3_up = true;
 	dev_dbg(tphy->dev, "USB3 PHY up, lane %d\n", swap);
-	return 0;
+	return;
 
 usb2_only:
 	/* power_off skips a PHY that never came up: undo here, so the next attach starts clean */
@@ -932,6 +939,15 @@ usb2_only:
 sleep:
 	t6040_usb3_sleep(tphy);
 	dev_warn(tphy->dev, "USB3 PHY bring-up failed (%d), USB2 only\n", ret);
+}
+
+static int t6040_usb3_power_on(struct phy *phy)
+{
+	struct t6040_usb2_phy *tphy = phy_get_drvdata(phy);
+
+	guard(mutex)(&tphy->lock);
+	tphy->usb3_on = true;
+	t6040_usb3_up_locked(tphy);
 	return 0;
 }
 
@@ -961,6 +977,8 @@ static int t6040_usb3_power_off(struct phy *phy)
 	struct t6040_usb2_phy *tphy = phy_get_drvdata(phy);
 
 	guard(mutex)(&tphy->lock);
+	tphy->usb3_on = false;
+	tphy->usb3_pipe = false;
 	t6040_usb3_down_locked(tphy);
 	return 0;
 }
@@ -978,6 +996,7 @@ static int t6040_usb3_set_mode(struct phy *phy, enum phy_mode mode, int submode)
 		return -EOPNOTSUPP;
 
 	guard(mutex)(&tphy->lock);
+	tphy->usb3_pipe = true;
 	if (!tphy->usb3_up || tphy->pipe_switched)
 		return 0;
 	t6040_usb3_pipe_switch(tphy);
@@ -1359,6 +1378,31 @@ static void t6040_dp_drive(struct t6040_usb2_phy *tphy, unsigned int lane, u32 p
 	t6040_usb2_mask32(base + (tx ? 0x100 : 0xa8), 0x7ffff, eq);
 }
 
+/*
+ * Give the lanes back to USB3 once the DP session is over and the port has
+ * left DP alt mode while dwc3 still holds the USB3 phy on: the USB3 bring-up
+ * programs the PHY afresh, as it does after DP on the next attach, and the
+ * PIPE returns to the PHY if the controller had asked for it. Called when
+ * the DP phy powers off and when the mux leaves DP, as either can come last.
+ * tipd drops the USB role before it leaves DP alt mode, so on an unplug or a
+ * DP mode change dwc3 powers the USB3 phy off first and this does nothing.
+ */
+static void t6040_usb3_reclaim_locked(struct t6040_usb2_phy *tphy)
+{
+	lockdep_assert_held(&tphy->lock);
+	if (!tphy->usb3_lent || tphy->dp_up || tphy->dp_alt)
+		return;
+	tphy->usb3_lent = false;
+	if (!tphy->usb3_on || tphy->usb3_up)
+		return;
+	t6040_usb3_up_locked(tphy);
+	if (tphy->usb3_up && tphy->usb3_pipe && !tphy->pipe_switched) {
+		t6040_usb3_pipe_switch(tphy);
+		tphy->pipe_switched = true;
+	}
+	dev_info(tphy->dev, "USB3 %s after DP\n", tphy->usb3_up ? "back" : "not restored");
+}
+
 /* ---- DP phy_ops ---- */
 
 static int t6040_dp_power_on(struct phy *phy)
@@ -1374,8 +1418,10 @@ static int t6040_dp_power_on(struct phy *phy)
 	 * lanes to DP: aciophy_phy_shutdown of the USB3 side first, then the
 	 * same mode-3 init as the fixed DP PHY.
 	 */
-	if (!t6040_dp_only(tphy))
+	if (!t6040_dp_only(tphy)) {
 		t6040_usb3_down_locked(tphy);
+		tphy->usb3_lent = true;
+	}
 	ret = t6040_dp_phy_init(tphy, tphy->dp_flip);
 	if (ret) {
 		dev_err(tphy->dev, "DP PHY init failed: %d\n", ret);
@@ -1395,6 +1441,7 @@ static int t6040_dp_power_off(struct phy *phy)
 
 	guard(mutex)(&tphy->lock);
 	tphy->dp_up = false;
+	t6040_usb3_reclaim_locked(tphy);
 	return 0;
 }
 
@@ -1512,6 +1559,7 @@ static int t6040_dp_mux_set(struct typec_mux_dev *mux, struct typec_mux_state *s
 		dp ? "DP" : "non-DP", state->mode, alt, tphy->dp_flip ? "reversed" : "normal");
 	if (alt && tphy->dp_up)
 		t6040_dp_xbar_config(tphy, tphy->dp_flip);
+	t6040_usb3_reclaim_locked(tphy);
 	return 0;
 }
 
