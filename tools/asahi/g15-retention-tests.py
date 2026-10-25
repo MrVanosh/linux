@@ -241,6 +241,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--mutations", action="store_true")
+    parser.add_argument("--control-source", type=Path,
+                        help="Public pre-fix mod.rs when the pinned revision is not locally available")
     args = parser.parse_args()
     out = (args.output or Path(tempfile.mkdtemp(prefix="g15-retention-"))).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -264,9 +266,10 @@ def main():
     source = source.replace("        // START_TAIL", tail)
     variants = {"actual": source}
     if args.mutations:
-        old = subprocess.check_output(
-            ["git", "show", CONTROL_REF + ":drivers/gpu/drm/asahi/g15/mod.rs"],
-            cwd=ROOT, text=True)
+        old = (args.control_source.read_text() if args.control_source else
+               subprocess.check_output(
+                   ["git", "show", CONTROL_REF + ":drivers/gpu/drm/asahi/g15/mod.rs"],
+                   cwd=ROOT, text=True))
         variants["consume-orphan-before-allocation"] = source.replace(orphan, item(old, "    pub(crate) fn orphan("))
         variants["unguarded-registry-allocation"] = source.replace(backend, item(old, "    fn start_backend("))
     receipt = {"scope": __doc__, "sources": {
@@ -274,6 +277,8 @@ def main():
         for name, text in [("mod.rs", mod), ("boot.rs", boot), ("kbox.rs", kbox)]},
         "rustc": subprocess.check_output([os.environ.get("HOSTRUSTC", "rustc"), "--version"], text=True).strip(),
         "cases": 23, "public_old_source_control": CONTROL_REF, "variants": {}}
+    if args.mutations:
+        receipt["old_control_sha256"] = hashlib.sha256(old.encode()).hexdigest()
     for name, text in variants.items():
         if name != "actual" and text == source:
             raise RuntimeError("NOT_APPLIED " + name)

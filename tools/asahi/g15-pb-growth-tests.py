@@ -57,6 +57,7 @@ A run that hangs (60 s) counts as no test failed.
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import resource
@@ -1360,11 +1361,15 @@ mod pb_growth_tests {
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument('--output', type=Path, help='Work directory (default: a temporary one)')
+    p.add_argument('--rustc', default=os.environ.get('HOSTRUSTC'),
+                   help='Host compiler executable (default: rustup run 1.93.1 rustc)')
     p.add_argument('--ref', help='Read the tested bodies at this git revision')
     p.add_argument('--mutation', choices=sorted(MUTATIONS) + sorted(CONTROLS))
     p.add_argument('--mutations', action='store_true',
                    help='Also require every mutation to fail and every control to pass')
     a = p.parse_args()
+    compiler = [a.rustc] if a.rustc else ['rustup', 'run', '1.93.1', 'rustc']
+    rustc_version = subprocess.check_output(compiler + ['--version'], text=True).strip()
     import tempfile
     out = (a.output or Path(tempfile.mkdtemp(prefix='g15-pb-growth-'))).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -1501,7 +1506,7 @@ def main():
         path = dir / 'growth-answer.rs'
         path.write_text(code)
         binary = dir / 'growth-answer'
-        build = subprocess.run(['rustup', 'run', '1.93.1', 'rustc', '--edition=2021', '--test', '-O',
+        build = subprocess.run(compiler + ['--edition=2021', '--test', '-O',
                                 '-C', 'overflow-checks=on', str(path), '-o', str(binary)],
                                capture_output=True, text=True)
         if build.returncode != 0:
@@ -1532,7 +1537,7 @@ def main():
                 'stderr': r.stderr[-2000:]}
 
     result = run(a.mutation)
-    receipt = {'ref': a.ref, 'old_ref': OLD_REF, 'old_reference_checked_against_git': old_git is not None,
+    receipt = {'compiler': compiler, 'rustc_version': rustc_version, 'ref': a.ref, 'old_ref': OLD_REF, 'old_reference_checked_against_git': old_git is not None,
                **result,
                'scope': 'Actual answer_growth/answer_request/soft_max/pb_max_blocks, pools/growth.rs, '
                         'fw/buffer.rs and fw/channels.rs over a model of the firmware objects with an '

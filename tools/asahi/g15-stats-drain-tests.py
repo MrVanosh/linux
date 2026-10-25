@@ -26,6 +26,7 @@ record words, so it takes longer than the earlier drain.
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import resource
@@ -374,10 +375,14 @@ fn main() {
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument('--output', type=Path, help='Work directory (default: a temporary one)')
+    p.add_argument('--rustc', default=os.environ.get('HOSTRUSTC'),
+                   help='Host compiler executable (default: rustup run 1.93.1 rustc)')
     p.add_argument('--ref', help='Read the tested bodies at this git revision')
     p.add_argument('--mutation', choices=sorted(MUTATIONS))
     p.add_argument('--mutations', action='store_true', help='Also require every mutation to fail')
     a = p.parse_args()
+    compiler = [a.rustc] if a.rustc else ['rustup', 'run', '1.93.1', 'rustc']
+    rustc_version = subprocess.check_output(compiler + ['--version'], text=True).strip()
     import tempfile
     out = (a.output or Path(tempfile.mkdtemp(prefix='g15-stats-drain-'))).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -425,7 +430,7 @@ def main():
         path = dir / 'drain.rs'
         path.write_text(code)
         binary = dir / 'drain'
-        subprocess.run(['rustup', 'run', '1.93.1', 'rustc', '--edition=2021', '-O', '-C', 'overflow-checks=on',
+        subprocess.run(compiler + ['--edition=2021', '-O', '-C', 'overflow-checks=on',
                         '-C', 'panic=abort', str(path), '-o', str(binary)], check=True)
 
         def no_core():
@@ -435,7 +440,7 @@ def main():
                 'exit': r.returncode, 'stdout': r.stdout, 'stderr': r.stderr[-2000:]}
 
     result = run(a.mutation)
-    receipt = {'ref': a.ref, 'old_ref': OLD_REF, 'old_reference_checked_against_git': old_git is not None,
+    receipt = {'compiler': compiler, 'rustc_version': rustc_version, 'ref': a.ref, 'old_ref': OLD_REF, 'old_reference_checked_against_git': old_git is not None,
                **result,
                'scope': 'Actual drain_one/note_stats/peek_stats/drain_rings and power/pstate.rs against '
                         f'drain_rings at {OLD_REF[:12]}, over a model of the firmware objects with an '
