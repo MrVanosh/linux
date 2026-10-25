@@ -3048,7 +3048,8 @@ static int dcp_start_desktop_external(struct apple_dcp *dcp, u32 map)
 	if (ret)
 		return ret;
 
-	if (!dcp->phy) {
+	/* An idle Type-C pipeline has no PHY until a route is claimed. */
+	if (!dcp->phy && !dcp->nr_typec_routes) {
 		dev_warn(dcp->dev, "no DP PHY and no Type-C route: no display link\n");
 		return 0;
 	}
@@ -3076,7 +3077,12 @@ static int dcp_start_desktop_external(struct apple_dcp *dcp, u32 map)
 	if (ret)
 		return ret;
 
-	if (!dptx_ret && dptx_service_available(&dcp->dptxport[0])) {
+	/*
+	 * A Type-C route powers the PHY and selects the crossbar when it is
+	 * claimed; until then there is no link to bring up.
+	 */
+	if (!dptx_ret && dptx_service_available(&dcp->dptxport[0]) &&
+	    (dcp->fixed_phy || dcp->active_typec_route)) {
 		ret = dcp_dptx_connect(dcp, 0);
 		if (ret)
 			dev_info(dcp->dev, "no DPTX link at startup: %d\n", ret);
