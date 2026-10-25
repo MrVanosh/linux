@@ -1557,6 +1557,7 @@ static int t6040_dp_probe(struct t6040_usb2_phy *tphy)
 			if (!of_property_present(dev->of_node, prop) ||
 			    !tphy->res[t6040_usb3_tunable_list[i].region]) {
 				dev_warn(dev, "DP: no %s\n", prop);
+				tphy->tunables[i] = NULL;
 				continue;
 			}
 			struct resource *res = tphy->res[t6040_usb3_tunable_list[i].region];
@@ -1725,6 +1726,7 @@ static int t6040_usb3_probe(struct t6040_usb2_phy *tphy, struct platform_device 
 		if (IS_ERR(tphy->tunables[i])) {
 			dev_warn(dev, "USB3: %s: %pe, USB2 only\n",
 				 t6040_usb3_tunable_list[i].prop, tphy->tunables[i]);
+			tphy->tunables[i] = NULL;
 			return 0;
 		}
 	}
