@@ -1582,6 +1582,7 @@ static int dcp_dptx_connect_raw(struct apple_dcp *dcp, u32 port, bool *retryable
 {
 	/* T8122 dcpext: HPD only after the link wait, see dcp_ext_dptx_607() */
 	bool late_hpd = dcp_ext_dptx_607(dcp);
+	bool compact;
 	unsigned long timeout;
 	u64 generation;
 	u8 dfp_port;
@@ -1607,6 +1608,8 @@ static int dcp_dptx_connect_raw(struct apple_dcp *dcp, u32 port, bool *retryable
 		dcp->connector_type, dcp->dptxport[port].connected);
 
 	mutex_lock(&dcp->hpd_mutex);
+	compact = dptx_service_available(&dcp->dptxport[port]) &&
+		  READ_ONCE(dcp->dptxport[port].service->ep->compact);
 	if (!dcp_connect_session_valid_locked(dcp, session, cable, recovery)) {
 		ret = -ESTALE;
 		goto out_unlock;
@@ -1635,9 +1638,14 @@ static int dcp_dptx_connect_raw(struct apple_dcp *dcp, u32 port, bool *retryable
 	reinit_completion(&dcp->dptxport[port].linkcfg_completion);
 	WRITE_ONCE(dcp->dptxport[port].tile_hint, false);
 	dcp->dptxport[port].atcphy = dcp->phy;
+	/* A desktop 26.x route powers its PHY when the display connects. */
+	ret = dcp_typec_phy_on(dcp);
+	if (ret)
+		goto out_unlock;
 	/* a tiled display's second half comes in on the port's dpin1 */
 	dfp_port = port && READ_ONCE(dcp->split.active) ? 2 : dcp->dptx_dfp_port;
-	if (!dcp_ext_dptx_607(dcp)) {
+	/* Compact DPTX (desktop 26.x) has no connection validation call. */
+	if (!dcp_ext_dptx_607(dcp) && !compact) {
 		ret = dptxport_validate_connection(dcp->dptxport[port].service,
 						   dfp_port,
 						   dcp->dptx_phy, dcp->dptx_die);
@@ -1712,7 +1720,12 @@ static int dcp_dptx_connect_raw(struct apple_dcp *dcp, u32 port, bool *retryable
 	/* A revoked wait must not disconnect or publish readiness for a new session. */
 	if (!dcp_connect_session_valid(dcp, session, cable, recovery))
 		return -ESTALE;
-	if (!ret && late_hpd) {
+	if (!ret && compact) {
+		/* Without a sink the link is configured once one arrives. */
+		dev_dbg(dcp->dev,
+			"dcp_dptx_connect: no link configuration on port %u yet\n", port);
+		ret = 0;
+	} else if (!ret && late_hpd) {
 		/* Without HPD this firmware does not train: assert it now. */
 		dev_dbg(dcp->dev,
 			"dcp_dptx_connect: no link configuration on port %u yet, asserting HPD\n",
@@ -2265,7 +2278,8 @@ int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 	struct dcp_fabric_session session = {};
 	int ret;
 
-	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP)
+	/* The fixed HDMI output of a desktop 26.x processor has no Type-C session. */
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP && !dcp_is_typec_output(dcp))
 		return dcp_desktop_dptx_connect(dcp, port);
 
 	if (!dcp_is_external_h17p(dcp)) {
@@ -2852,7 +2866,7 @@ int dcp_dptx_connect_oob(struct platform_device *pdev, u32 port)
 {
 	struct apple_dcp *dcp = platform_get_drvdata(pdev);
 
-	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP)
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP && !dcp_is_typec_output(dcp))
 		return dcp_desktop_dptx_connect(dcp, port);
 
 	if (dcp_is_external_h17p(dcp)) {
@@ -2895,8 +2909,9 @@ int dcp_dptx_connect_oob(struct platform_device *pdev, u32 port)
 int dcp_dptx_disconnect_oob(struct platform_device *pdev, u32 port)
 {
 	struct apple_dcp *dcp = platform_get_drvdata(pdev);
+	int ret;
 
-	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP)
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP && !dcp_is_typec_output(dcp))
 		return dcp_desktop_dptx_disconnect_oob(dcp, port);
 
 	if (dcp_is_external_h17p(dcp))
@@ -2924,13 +2939,16 @@ int dcp_dptx_disconnect_oob(struct platform_device *pdev, u32 port)
 		av_service_disconnect(dcp);
 
 	if (dptx_service_available(&dcp->dptxport[port])) {
-		int ret = dptxport_set_hpd(dcp->dptxport[port].service, false);
-
+		ret = dptxport_set_hpd(dcp->dptxport[port].service, false);
 		if (ret)
 			return ret;
 	}
 
-	return dcp_dptx_disconnect(dcp, port);
+	ret = dcp_dptx_disconnect(dcp, port);
+	/* The firmware shuts a desktop 26.x external pipe down with its display. */
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP && !dcp->main_display)
+		dcp->desktop->ext_pipe_off = true;
+	return ret;
 }
 
 /*
