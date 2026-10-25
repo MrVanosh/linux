@@ -490,11 +490,12 @@ static int dptxport_call_get_link_rate(struct apple_epic_service *service,
 static int dptxport_compact_xbar_link(struct apple_epic_service *service, bool up)
 {
 	struct apple_dcp *dcp = service->ep->dcp;
+	struct mux_control *xbar = READ_ONCE(dcp->xbar);
 	int ret;
 
-	if (!READ_ONCE(service->ep->compact) || !dcp->xbar)
+	if (!READ_ONCE(service->ep->compact) || !xbar)
 		return 0;
-	ret = dcp_dpxbar_link(dcp->xbar, up);
+	ret = dcp_dpxbar_link(xbar, up);
 	dev_dbg(dcp->dev, "DPTXPort: crossbar link %s: %d\n", up ? "up" : "down", ret);
 	return ret;
 }
