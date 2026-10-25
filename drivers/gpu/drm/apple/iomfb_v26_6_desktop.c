@@ -200,6 +200,97 @@ static const iomfb_cb_handler cb_handlers[IOMFB_MAX_CB] = {
 	[599] = trampoline_nop,
 };
 
+/*
+ * What each handler above reads from the request and writes to the reply.
+ * The firmware may send longer records; a shorter one is refused.
+ */
+struct dcp_cb_min_v26_6_desktop {
+	u32 in_len;
+	u32 out_len;
+	bool valid;
+};
+
+#define CB_MIN(in, out) { .in_len = (in), .out_len = (out), .valid = true }
+
+static const struct dcp_cb_min_v26_6_desktop cb_min[IOMFB_MAX_CB] = {
+	[0] = CB_MIN(0, sizeof(u8)),
+	[1] = CB_MIN(0, sizeof(u8)),
+	[2] = CB_MIN(0, 0),
+	[3] = CB_MIN(0, sizeof(struct dcp_rt_bandwidth)),
+	[6] = CB_MIN(sizeof(struct dcp_set_frame_sync_props_req_v26_6_desktop),
+		     sizeof(struct dcp_set_frame_sync_props_resp_v26_6_desktop)),
+	[100] = CB_MIN(0, 0),
+	[101] = CB_MIN(0, sizeof(u32)),
+	[102] = CB_MIN(0, 0),
+	[104] = CB_MIN(0, 0),
+	[107] = CB_MIN(0, 0),
+	[108] = CB_MIN(0, sizeof(u8)),
+	[109] = CB_MIN(0, sizeof(u8)),
+	[110] = CB_MIN(0, sizeof(u8)),
+	[111] = CB_MIN(0, sizeof(u8)),
+	[112] = CB_MIN(0, sizeof(u8)),
+	[113] = CB_MIN(0, sizeof(u8)),
+	[114] = CB_MIN(sizeof(struct dcp_dict_passthrough_req_v26_6),
+		       sizeof(struct dcp_dict_passthrough_resp_v26_6)),
+	[115] = CB_MIN(sizeof(struct dcpep_get_tiling_state_req),
+		       sizeof(struct dcpep_get_tiling_state_resp)),
+	[121] = CB_MIN(0, 0),
+	[122] = CB_MIN(0, sizeof(u8)),
+	[123] = CB_MIN(0, sizeof(u8)),
+	[125] = CB_MIN(sizeof(struct dcp_read_edt_data_req),
+		       sizeof(dcp_read_edt_data_resp_t)),
+	[127] = CB_MIN(sizeof(u32), sizeof(u8)),
+	[128] = CB_MIN(sizeof(struct dcp_set_dcpav_prop_chunk_req), sizeof(u8)),
+	[129] = CB_MIN(sizeof(struct dcp_set_dcpav_prop_end_req), sizeof(u8)),
+	[134] = CB_MIN(0, sizeof(u32)),
+	[201] = CB_MIN(sizeof(struct dcp_map_buf_req),
+		       sizeof(struct DCP_FW_NAME(dcp_map_buf_resp))),
+	[206] = CB_MIN(0, sizeof(u8)),
+	[207] = CB_MIN(0, sizeof(u8)),
+	[208] = CB_MIN(0, 0),
+	[209] = CB_MIN(0, sizeof(u64)),
+	[300] = CB_MIN(sizeof(struct iomfb_property), 0),
+	[400] = CB_MIN(0, 0),
+	[401] = CB_MIN(sizeof(struct dcp_get_uint_prop_req),
+		       sizeof(struct dcp_get_uint_prop_resp)),
+	[406] = CB_MIN(0, 0),
+	[408] = CB_MIN(0, sizeof(u64)),
+	[411] = CB_MIN(sizeof(struct DCP_FW_NAME(dcp_map_reg_req)),
+		       sizeof(struct DCP_FW_NAME(dcp_map_reg_resp))),
+	[413] = CB_MIN(0, sizeof(u8)),
+	[414] = CB_MIN(sizeof(struct iomfb_sr_set_property_int_req), sizeof(u8)),
+	[415] = CB_MIN(0, sizeof(u8)),
+	[451] = CB_MIN(sizeof(struct dcp_allocate_buffer_req),
+		       sizeof(struct dcp_allocate_buffer_resp)),
+	[552] = CB_MIN(0, sizeof(u8)),
+	[561] = CB_MIN(0, sizeof(u8)),
+	[563] = CB_MIN(0, sizeof(u8)),
+	[565] = CB_MIN(0, sizeof(u8)),
+	[567] = CB_MIN(0, sizeof(u8)),
+	[572] = CB_MIN(0, sizeof(u32)),
+	[575] = CB_MIN(sizeof(struct dcp_hotplug_req_v26_6),
+		       sizeof(struct dcp_hotplug_resp_v26_6)),
+	[576] = CB_MIN(0, 0),
+	[581] = CB_MIN(0, 0),
+	[582] = CB_MIN(0, sizeof(u8)),
+	[590] = CB_MIN(sizeof(struct DCP_FW_NAME(dc_swap_complete_resp)), 0),
+	[592] = CB_MIN(sizeof(dcp_swap_intent_t), 0),
+	[593] = CB_MIN(sizeof(u32), 0),
+	[594] = CB_MIN(sizeof(u8), 0),
+	[595] = CB_MIN(0, 0),
+	[598] = CB_MIN(0, 0),
+	[599] = CB_MIN(0, 0),
+};
+
+#undef CB_MIN
+
+bool iomfb_check_callback_v26_6_desktop(int tag, u32 in_len, u32 out_len)
+{
+	if (tag < 0 || tag >= IOMFB_MAX_CB || !cb_min[tag].valid)
+		return false;
+	return in_len >= cb_min[tag].in_len && out_len >= cb_min[tag].out_len;
+}
+
 void DCP_FW_NAME(iomfb_start)(struct apple_dcp *dcp)
 {
 	dcp->cb_handlers = cb_handlers;
