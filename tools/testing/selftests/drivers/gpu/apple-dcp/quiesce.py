@@ -134,8 +134,9 @@ enum atcphy_mode { APPLE_ATCPHY_MODE_OFF, APPLE_ATCPHY_MODE_USB2,
  APPLE_ATCPHY_MODE_TBT, APPLE_ATCPHY_MODE_USB4 };
 enum atcphy_pipehandler_state { ATCPHY_PIPEHANDLER_STATE_DUMMY, ATCPHY_PIPEHANDLER_STATE_USB3 };
 GENERATION_ENUM
-struct atcphy_hw { GENERATION_FIELD bool has_usb4,has_t8140_dp,dp_t8122; };
+struct atcphy_hw { GENERATION_FIELD bool has_usb4,has_t8140_dp,dp_t8122; u32 usb2phy_sig_host; };
 struct apple_atcphy {
+ struct { void *usb3_dp; } tunables;
  void *dev; int lock;
  const struct atcphy_hw *hw;
  struct { void *usb2phy; } regs;

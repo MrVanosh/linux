@@ -87,8 +87,8 @@
 	};
 };
 
-/* DPA1: the HDMI port's DisplayPort audio, SIO channel 0x66. */
-&soc {
+/* DPA1 has no AP-side registers, so it is not a child of the SoC bus. */
+/ {
 	dpaudio1: audio-controller-1 {
 		compatible = "apple,t6030-dpaudio", "apple,dpaudio";
 		dmas = <&sio 0x66>;

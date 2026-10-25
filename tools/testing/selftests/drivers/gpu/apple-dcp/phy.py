@@ -32,6 +32,10 @@ def parking(root):
         parts.append(block(atc, 'struct ' + name + ' {') + ';')
     parts.append(r'''
 struct apple_atcphy {
+    /* T8132-only paths are covered by drivers/apple/atc-t8132-usb3.py. */
+    bool t8132_ss, t8132_common_owned, t8132_failed;
+    struct { void *usb3_dp; } tunables;
+
     const struct atcphy_hw *hw;
     struct { unsigned char *core, *lpdptx, *pipehandler, *usb2phy; } regs;
     struct reset_controller_dev rcdev;
@@ -144,6 +148,13 @@ static void atcphy_restore_after_pd_off(struct apple_atcphy *);
 static int atcphy_power_off(struct apple_atcphy *);
 static int atcphy_configure(struct apple_atcphy *, enum atcphy_mode);
 
+/* These units exercise older PHY generations. Never accept a T8132 dispatch. */
+static int __attribute__((unused)) atcphy_configure_t8132(struct apple_atcphy *p, enum atcphy_mode mode)
+{ (void)p; (void)mode; assert(false); return -EOPNOTSUPP; }
+static int __attribute__((unused)) atcphy_configure_pipehandler_usb3_host_t8132(struct apple_atcphy *p)
+{ (void)p; assert(false); return -EOPNOTSUPP; }
+
+
 ''')
     for name in ('atc_t8122_dp_mask', 'atc_t8122_dp_aux_on', 'atc_t8122_dp_aux_off', 'atc_t8122_dp_aux_is_on'):
         match = re.search(r'^static inline [^\n]*\b' + name + r'\([^;{}]*\)\s*\{', t8122, re.M)
@@ -151,8 +162,7 @@ static int atcphy_configure(struct apple_atcphy *, enum atcphy_mode);
         parts.append(block(t8122, match.start()).replace('static inline ', 'static inline __attribute__((unused)) ', 1))
     for name in ('atcphy_dp_aux_on_t8122', 'atcphy_dp_stop_t8122'):
         parts.append(function(atc, name))
-    for name in ('atcphy_pipehandler_lock', 'atcphy_pipehandler_lock_live',
-                 'atcphy_pipehandler_unlock', 'atcphy_pipehandler_check',
+    for name in ('atcphy_pipehandler_lock_timeout', 'atcphy_pipehandler_lock', 'atcphy_pipehandler_lock_live', 'atcphy_pipehandler_unlock', 'atcphy_pipehandler_check',
                  'atcphy_pipehandler_set_mux', 'atcphy_clear_nonselected_phy_reset',
                  'atcphy_configure_pipehandler_usb3_host_t8122',
                  'atcphy_configure_pipehandler_usb3_host_t8103',
@@ -694,7 +704,7 @@ static void orientation_faults(void)
                            !strcmp(caller, "j700_usb_field_update") ||
                            !strcmp(caller, "atcphy_power_on") ||
                            !strcmp(caller, "atcphy_configure") ||
-                           (fixed && (!strcmp(caller, "atcphy_pipehandler_lock") ||
+                           (fixed && (!strcmp(caller, "atcphy_pipehandler_lock_timeout") ||
                                       !strcmp(caller, "atcphy_pipehandler_unlock"))));
                 }
             }
@@ -851,7 +861,7 @@ static void safe_first_recovery(void)
         assert(select_mode(&p, APPLE_ATCPHY_MODE_USB3_DP) == 0);
         unsigned int host_lock_poll = 0;
         for (unsigned int i = 0; i < polls; i++)
-            if (!strcmp(poll_caller[i], "atcphy_pipehandler_lock")) host_lock_poll = i + 1;
+            if (!strcmp(poll_caller[i], "atcphy_pipehandler_lock_timeout")) host_lock_poll = i + 1;
         assert(host_lock_poll > 1); /* Inject the host lock, after acknowledged parking. */
         orientation_initial(&p, true);
         orient(&p, first);
@@ -1101,7 +1111,7 @@ static void t8103_release_fault(struct apple_atcphy *p, struct phy *phy, bool fi
         if (unlock) {
             assert(polls==2 && only_released(0) && p->pipe_pending && mux_writes==0);
         } else {
-            assert(polls==3 && !strcmp(poll_caller[1],"atcphy_pipehandler_lock") &&
+            assert(polls==3 && !strcmp(poll_caller[1],"atcphy_pipehandler_lock_timeout") &&
                    !strcmp(poll_caller[2],"atcphy_pipehandler_unlock"));
             assert(!p->pipe_pending && mux_writes==3);
         }
@@ -1237,7 +1247,7 @@ static void pending_gate(void)
         struct apple_atcphy p;
         legacy_setup(&p,gen,false);
         struct phy phy={&p};
-        const char *fault="atcphy_pipehandler_lock";
+        const char *fault="atcphy_pipehandler_lock_timeout";
 #if !T8103_HOST_BIST
         /* T8103 host start takes no lock: fail the release of a stale one instead. */
         if (gen==0) {
@@ -1311,7 +1321,7 @@ static void dp_cache_gate(void)
         struct apple_atcphy p;
         legacy_setup(&p,gen,false);
         struct phy phy={&p};
-        const char *fault="atcphy_pipehandler_lock";
+        const char *fault="atcphy_pipehandler_lock_timeout";
 #if !T8103_HOST_BIST
         /* T8103 host start takes no lock: fail the release of a stale one instead. */
         if (gen==0) {
@@ -1909,6 +1919,10 @@ def pipe(root):
         parts.append(block('struct ' + name + ' {') + ';')
     parts.append(r'''
 struct apple_atcphy {
+    /* T8132-only paths are covered by drivers/apple/atc-t8132-usb3.py. */
+    bool t8132_ss, t8132_common_owned, t8132_failed;
+    struct { void *usb3_dp; } tunables;
+
     bool dp_only, pd_was_off, tunnel_clock_on;
     unsigned int tunnel_rate, tunnel_users;
     struct { bool aux, pll; unsigned int pairs, rate; } dp_t8122;
@@ -1959,6 +1973,13 @@ static void core_clear32(struct apple_atcphy *p, u32 o, u32 v) { core_mask32(p, 
 /* Observation is read-only and separately tested; retain production caller control flow. */
 static void __attribute__((unused)) atcphy_restore_after_pd_off(struct apple_atcphy *p) { assert(!p->pd_was_off); }
 static int atcphy_configure(struct apple_atcphy *p, enum atcphy_mode mode);
+
+/* These units exercise older PHY generations. Never accept a T8132 dispatch. */
+static int __attribute__((unused)) atcphy_configure_t8132(struct apple_atcphy *p, enum atcphy_mode mode)
+{ (void)p; (void)mode; assert(false); return -EOPNOTSUPP; }
+static int __attribute__((unused)) atcphy_configure_pipehandler_usb3_host_t8132(struct apple_atcphy *p)
+{ (void)p; assert(false); return -EOPNOTSUPP; }
+
 ''')
     for name in ('core_read32', 'atcphy_get_mode_config'):
         parts.append(function(name))
@@ -1975,8 +1996,7 @@ static int atcphy_configure(struct apple_atcphy *p, enum atcphy_mode mode)
     p->mode = mode; p->mode_dirty = false; return 0;
 }
 ''')
-    for name in ('atcphy_pipehandler_lock', 'atcphy_pipehandler_lock_live',
-                 'atcphy_pipehandler_unlock', 'atcphy_pipehandler_check',
+    for name in ('atcphy_pipehandler_lock_timeout', 'atcphy_pipehandler_lock', 'atcphy_pipehandler_lock_live', 'atcphy_pipehandler_unlock', 'atcphy_pipehandler_check',
                  'atcphy_pipehandler_set_mux', 'atcphy_clear_nonselected_phy_reset',
                  'atcphy_configure_pipehandler_usb3_host_t8122',
                  'atcphy_configure_pipehandler_usb3_host_t8103',
@@ -2110,7 +2130,7 @@ static void host_lock_failure(void)
         hw.gen = gen ? ATCPHY_GENERATION_T8122 : ATCPHY_GENERATION_T8103;
         initial(&p, APPLE_ATCPHY_MODE_USB3, ATCPHY_PIPEHANDLER_STATE_DUMMY);
         struct phy phy = { &p };
-        const char *fault = "atcphy_pipehandler_lock";
+        const char *fault = "atcphy_pipehandler_lock_timeout";
 #if !T8103_HOST_BIST
         /* T8103 host start takes no lock: fail the release of a stale one instead. */
         if (!gen) {
@@ -2296,6 +2316,10 @@ def unwind(root):
         parts.append(block(atc, 'struct ' + name + ' {') + ';')
     parts.append(r'''
 struct apple_atcphy {
+    /* T8132-only paths are covered by drivers/apple/atc-t8132-usb3.py. */
+    bool t8132_ss, t8132_common_owned, t8132_failed;
+    struct { void *usb3_dp; } tunables;
+
     bool dp_only, pd_was_off, tunnel_clock_on;
     unsigned int tunnel_rate, tunnel_users;
     struct { bool aux, pll; unsigned int pairs, rate; } dp_t8122;
@@ -2374,6 +2398,13 @@ static bool of_machine_is_compatible(const char *name) { (void)name; return fals
 #endif
 static int atcphy_power_off(struct apple_atcphy *);
 static int atcphy_configure(struct apple_atcphy *, enum atcphy_mode);
+
+/* These units exercise older PHY generations. Never accept a T8132 dispatch. */
+static int __attribute__((unused)) atcphy_configure_t8132(struct apple_atcphy *p, enum atcphy_mode mode)
+{ (void)p; (void)mode; assert(false); return -EOPNOTSUPP; }
+static int __attribute__((unused)) atcphy_configure_pipehandler_usb3_host_t8132(struct apple_atcphy *p)
+{ (void)p; assert(false); return -EOPNOTSUPP; }
+
 
 static int atcphy_park_pipehandler(struct apple_atcphy *p, bool keep_dp)
 { (void)keep_dp; p->pipe_state = ATCPHY_PIPEHANDLER_STATE_DUMMY; return 0; }
@@ -2604,6 +2635,10 @@ def aux(root):
 typedef uint32_t u32;
 #define BIT(n) (1U << (n))
 struct apple_atcphy {
+    /* T8132-only paths are covered by drivers/apple/atc-t8132-usb3.py. */
+    bool t8132_ss, t8132_common_owned, t8132_failed;
+    struct { void *usb3_dp; } tunables;
+
     bool dp_only, pd_was_off, tunnel_clock_on;
     unsigned int tunnel_rate, tunnel_users;
     struct { bool aux, pll; unsigned int pairs, rate; } dp_t8122; struct { unsigned char *core; } regs; bool aux_power_requested; };

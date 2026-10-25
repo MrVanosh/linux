@@ -26,6 +26,8 @@
 		/* used by the loader to hand over the display */
 		dcp = &dcp;
 		disp0 = &display;
+		/* the boot loader finds the GPU node through this alias */
+		gpu = &gpu;
 	};
 
 	chosen {
@@ -71,6 +73,40 @@
 		isp_heap: isp-heap {
 			iommu-addresses = <&isp 0x100 0x0 0x0 0x2000000>;
 		};
+
+		/*
+		 * Data segment of the loaded GPU firmware (ADT sgx gfx-data-*); it
+		 * places its crash log here.
+		 */
+		gpu_fw_data: gpu-fw-data@10001d44000 {
+			reg = <0x100 0x01d44000 0x0 0x138000>;
+			no-map;
+		};
+
+		/*
+		 * The UAT ranges (ADT sgx gpu-region-*, gfx-shared-region-*,
+		 * gfx-shared-l2-region-*, gfx-handoff-*). They stay no-map until
+		 * the boot loader adds them to /memory.
+		 */
+		uat_ttbs: uat-ttbs@10bfffb8000 {
+			reg = <0x10b 0xfffb8000 0x0 0x4000>;
+			no-map;
+		};
+
+		uat_pagetables: uat-pagetables@10bfff78000 {
+			reg = <0x10b 0xfff78000 0x0 0x40000>;
+			no-map;
+		};
+
+		uat_l2_pagetables: uat-l2-pagetables@10bfff74000 {
+			reg = <0x10b 0xfff74000 0x0 0x4000>;
+			no-map;
+		};
+
+		uat_handoff: uat-handoff@10bfff70000 {
+			reg = <0x10b 0xfff70000 0x0 0x4000>;
+			no-map;
+		};
 	};
 
 	memory@0 {
@@ -87,6 +123,158 @@
 			function = LED_FUNCTION_KBD_BACKLIGHT;
 			color = <LED_COLOR_ID_WHITE>;
 			max-brightness = <255>;
+		};
+	};
+
+	/*
+	 * GPU performance states, one opp-microvolt cell per cluster (ADT
+	 * /arm-io/sgx perf-states and perf-states1). The operating points are
+	 * binned per device: these are this unit's values until the boot
+	 * loader fills them in. Entries keep the order of the GPU performance
+	 * states, which is not sorted by frequency.
+	 */
+	gpu_opp: opp-table-gpu {
+		compatible = "operating-points-v2";
+
+		opp00 {
+			opp-hz = /bits/ 64 <0>;
+			opp-microvolt = <125000 125000>;
+		};
+		opp01 {
+			opp-hz = /bits/ 64 <338000000>;
+			opp-microvolt = <605000 585000>;
+		};
+		opp02 {
+			opp-hz = /bits/ 64 <618000000>;
+			opp-microvolt = <655000 640000>;
+		};
+		opp03 {
+			opp-hz = /bits/ 64 <796000000>;
+			opp-microvolt = <690000 690000>;
+		};
+		opp04 {
+			opp-hz = /bits/ 64 <924000000>;
+			opp-microvolt = <715000 725000>;
+		};
+		opp05 {
+			opp-hz = /bits/ 64 <952000000>;
+			opp-microvolt = <755000 770000>;
+		};
+		opp06 {
+			opp-hz = /bits/ 64 <1056000000>;
+			opp-microvolt = <755000 770000>;
+		};
+		opp07 {
+			opp-hz = /bits/ 64 <1062000000>;
+			opp-microvolt = <795000 810000>;
+		};
+		opp08 {
+			opp-hz = /bits/ 64 <1182000000>;
+			opp-microvolt = <795000 810000>;
+		};
+		opp09 {
+			opp-hz = /bits/ 64 <1182000000>;
+			opp-microvolt = <845000 860000>;
+		};
+		opp10 {
+			opp-hz = /bits/ 64 <1312000000>;
+			opp-microvolt = <845000 860000>;
+		};
+		opp11 {
+			opp-hz = /bits/ 64 <1242000000>;
+			opp-microvolt = <900000 915000>;
+		};
+		opp12 {
+			opp-hz = /bits/ 64 <1380000000>;
+			opp-microvolt = <900000 915000>;
+		};
+		opp13 {
+			opp-hz = /bits/ 64 <1326000000>;
+			opp-microvolt = <945000 960000>;
+		};
+		opp14 {
+			opp-hz = /bits/ 64 <1470000000>;
+			opp-microvolt = <945000 960000>;
+		};
+		opp15 {
+			opp-hz = /bits/ 64 <1578000000>;
+			opp-microvolt = <1030000 1045000>;
+		};
+	};
+
+	/* The GPU's CS clock domain (ADT cs-perf-states) */
+	gpu_cs_opp: opp-table-gpucs {
+		compatible = "operating-points-v2";
+
+		opp00 {
+			opp-hz = /bits/ 64 <24000000>;
+			opp-microvolt = <555000>;
+		};
+		opp01 {
+			opp-hz = /bits/ 64 <338000000>;
+			opp-microvolt = <555000>;
+		};
+		opp02 {
+			opp-hz = /bits/ 64 <618000000>;
+			opp-microvolt = <620000>;
+		};
+		opp03 {
+			opp-hz = /bits/ 64 <796000000>;
+			opp-microvolt = <660000>;
+		};
+		opp04 {
+			opp-hz = /bits/ 64 <992000000>;
+			opp-microvolt = <715000>;
+		};
+		opp05 {
+			opp-hz = /bits/ 64 <1188000000>;
+			opp-microvolt = <780000>;
+		};
+		opp06 {
+			opp-hz = /bits/ 64 <1380000000>;
+			opp-microvolt = <870000>;
+		};
+		opp07 {
+			opp-hz = /bits/ 64 <1470000000>;
+			opp-microvolt = <910000>;
+		};
+	};
+
+	/* The GPU's AFR clock domain (ADT afr-perf-states) */
+	gpu_afr_opp: opp-table-gpuafr {
+		compatible = "operating-points-v2";
+
+		opp00 {
+			opp-hz = /bits/ 64 <24000000>;
+			opp-microvolt = <555000>;
+		};
+		opp01 {
+			opp-hz = /bits/ 64 <338000000>;
+			opp-microvolt = <555000>;
+		};
+		opp02 {
+			opp-hz = /bits/ 64 <618000000>;
+			opp-microvolt = <620000>;
+		};
+		opp03 {
+			opp-hz = /bits/ 64 <796000000>;
+			opp-microvolt = <660000>;
+		};
+		opp04 {
+			opp-hz = /bits/ 64 <992000000>;
+			opp-microvolt = <715000>;
+		};
+		opp05 {
+			opp-hz = /bits/ 64 <1188000000>;
+			opp-microvolt = <780000>;
+		};
+		opp06 {
+			opp-hz = /bits/ 64 <1380000000>;
+			opp-microvolt = <870000>;
+		};
+		opp07 {
+			opp-hz = /bits/ 64 <1470000000>;
+			opp-microvolt = <910000>;
 		};
 	};
 
@@ -245,7 +433,7 @@
 &pinctrl {
 	status = "okay";
 
-	wifi_clkreq: wifi-clkreq {
+	wifi_clkreq_pins: wifi-clkreq-pins {
 		pinmux = <APPLE_PINMUX(0, 1)>;
 	};
 };
@@ -288,6 +476,9 @@
 };
 
 &mtp_hid {
+	/* SMC key gp1c powers the trackpad analog front end. */
+	apple,afe-smc = <&smc>;
+
 	multi-touch {
 		firmware-name = "apple/tpmtfw-j616s.bin";
 	};
@@ -332,10 +523,9 @@
 };
 
 /*
- * Wi-Fi and Bluetooth (BCM4388). The boot loader adds the per-unit
- * calibration and Bluetooth address to these nodes, and its Bluetooth
- * admission depends on this node exactly as it is; it is kept as the
- * booted tree has it.
+ * Wi-Fi and Bluetooth (BCM4388). The boot loader finds these nodes by
+ * the paths in the wifi0 and bluetooth0 aliases and adds the per-unit
+ * calibration, the antenna SKU and the addresses to them.
  */
 / {
 	pcie0: pcie@1cb0000000 {
@@ -355,7 +545,7 @@
 			    "phy0", "phy1", "phy2", "phy3";
 		ranges = <0x43000000 0xb 0xc0000000 0xb 0xc0000000 0 0x20000000 0x2000000 0 0x80000000 0xb 0x80000000 0 0x40000000>;
 		pinctrl-names = "default";
-		pinctrl-0 = <&wifi_clkreq>;
+		pinctrl-0 = <&wifi_clkreq_pins>;
 		#size-cells = <2>;
 		#address-cells = <3>;
 		bus-range = <0 1>;
@@ -385,6 +575,8 @@
 			bluetooth@0,1 {
 				compatible = "pci14e4,5f72";
 				reg = <0x100 0 0 0 0>;
+				/* To be filled by the loader */
+				local-bd-address = [00 00 00 00 00 00];
 				brcm,board-type = "apple,hostomel";
 				status = "okay";
 			};
@@ -618,3 +810,269 @@
 &isp_dart2 {
 	status = "okay";
 };
+
+/*
+ * The GPU stays disabled until a boot loader fills in this unit's operating
+ * points, leakage and regions from the ADT; the values here are one unit's.
+ * Enabling it also takes gfx_mbox, keeps ps_afr and ps_gfx always on and
+ * claims pmp_gfx always-on, so that the PMP sees the GPU on exactly while it
+ * is powered.
+ */
+&gpu {
+	memory-region = <&uat_ttbs>, <&uat_pagetables>, <&uat_handoff>,
+			<&gpu_fw_data>, <&uat_l2_pagetables>;
+	memory-region-names = "ttbs", "pagetables", "handoff", "fw-data",
+			      "l2-pagetables";
+	operating-points-v2 = <&gpu_opp>;
+	apple,cs-opp = <&gpu_cs_opp>;
+	apple,afr-opp = <&gpu_afr_opp>;
+	status = "disabled";
+};
+
+/*
+ * The Type-C ports (ADT nub-spmi-a0 hpm0/hpm1, nub-spmi-a1 hpm2) and the
+ * MagSafe controller (nub-spmi-a0 hpm5). The ADT lists the event, sleep and
+ * wake interrupts; select is event + 2.
+ */
+&nub_spmi_a0 {
+	status = "okay";
+
+	hpm0: usb-pd@c {
+		compatible = "apple,sn201202x";
+		reg = <0xc SPMI_USID>;
+		interrupts = <11 IRQ_TYPE_EDGE_RISING>,
+			     <13 IRQ_TYPE_EDGE_RISING>,
+			     <17 IRQ_TYPE_EDGE_RISING>,
+			     <19 IRQ_TYPE_EDGE_RISING>;
+		interrupt-names = "irq", "select", "sleep", "wake";
+
+		typec0: connector {
+			compatible = "usb-c-connector";
+			label = "USB-C Left Back";
+			power-role = "dual";
+			data-role = "dual";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+					typec0_con_hs: endpoint {
+						remote-endpoint = <&usb_drd0_hs>;
+					};
+				};
+
+				port@1 {
+					reg = <1>;
+					typec0_con_ss: endpoint {
+						remote-endpoint = <&atcphy0_ss>;
+					};
+				};
+			};
+		};
+	};
+
+	hpm1: usb-pd@a {
+		compatible = "apple,sn201202x";
+		reg = <0xa SPMI_USID>;
+		interrupts = <37 IRQ_TYPE_EDGE_RISING>,
+			     <39 IRQ_TYPE_EDGE_RISING>,
+			     <43 IRQ_TYPE_EDGE_RISING>,
+			     <45 IRQ_TYPE_EDGE_RISING>;
+		interrupt-names = "irq", "select", "sleep", "wake";
+
+		typec1: connector {
+			compatible = "usb-c-connector";
+			label = "USB-C Left Front";
+			power-role = "dual";
+			data-role = "dual";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+					typec1_con_hs: endpoint {
+						remote-endpoint = <&usb_drd1_hs>;
+					};
+				};
+
+				port@1 {
+					reg = <1>;
+					typec1_con_ss: endpoint {
+						remote-endpoint = <&atcphy1_ss>;
+					};
+				};
+			};
+		};
+	};
+
+	/* MagSafe port */
+	hpm5: usb-pd@8 {
+		compatible = "apple,sn201202x";
+		reg = <0x8 SPMI_USID>;
+		interrupts = <63 IRQ_TYPE_EDGE_RISING>,
+			     <65 IRQ_TYPE_EDGE_RISING>,
+			     <69 IRQ_TYPE_EDGE_RISING>,
+			     <71 IRQ_TYPE_EDGE_RISING>;
+		interrupt-names = "irq", "select", "sleep", "wake";
+	};
+};
+
+&nub_spmi_a1 {
+	status = "okay";
+
+	hpm2: usb-pd@c {
+		compatible = "apple,sn201202x";
+		reg = <0xc SPMI_USID>;
+		interrupts = <11 IRQ_TYPE_EDGE_RISING>,
+			     <13 IRQ_TYPE_EDGE_RISING>,
+			     <17 IRQ_TYPE_EDGE_RISING>,
+			     <19 IRQ_TYPE_EDGE_RISING>;
+		interrupt-names = "irq", "select", "sleep", "wake";
+
+		typec2: connector {
+			compatible = "usb-c-connector";
+			label = "USB-C Right";
+			power-role = "dual";
+			data-role = "dual";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+					typec2_con_hs: endpoint {
+						remote-endpoint = <&usb_drd2_hs>;
+					};
+				};
+
+				port@1 {
+					reg = <1>;
+					typec2_con_ss: endpoint {
+						remote-endpoint = <&atcphy2_ss>;
+					};
+				};
+			};
+		};
+	};
+};
+
+&atcphy0 {
+	status = "okay";
+
+	port {
+		atcphy0_ss: endpoint {
+			remote-endpoint = <&typec0_con_ss>;
+		};
+	};
+};
+
+&atcphy0_mbox {
+	status = "okay";
+};
+
+&usb_drd0_dart_0 {
+	status = "okay";
+};
+
+&usb_drd0_dart_1 {
+	status = "okay";
+};
+
+&usb_drd0 {
+	status = "okay";
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+			usb_drd0_hs: endpoint {
+				remote-endpoint = <&typec0_con_hs>;
+			};
+		};
+	};
+};
+
+&atcphy1 {
+	status = "okay";
+
+	port {
+		atcphy1_ss: endpoint {
+			remote-endpoint = <&typec1_con_ss>;
+		};
+	};
+};
+
+&atcphy1_mbox {
+	status = "okay";
+};
+
+&usb_drd1_dart_0 {
+	status = "okay";
+};
+
+&usb_drd1_dart_1 {
+	status = "okay";
+};
+
+&usb_drd1 {
+	status = "okay";
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+			usb_drd1_hs: endpoint {
+				remote-endpoint = <&typec1_con_hs>;
+			};
+		};
+	};
+};
+
+&atcphy2 {
+	status = "okay";
+
+	port {
+		atcphy2_ss: endpoint {
+			remote-endpoint = <&typec2_con_ss>;
+		};
+	};
+};
+
+&atcphy2_mbox {
+	status = "okay";
+};
+
+&usb_drd2_dart_0 {
+	status = "okay";
+};
+
+&usb_drd2_dart_1 {
+	status = "okay";
+};
+
+&usb_drd2 {
+	status = "okay";
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+			usb_drd2_hs: endpoint {
+				remote-endpoint = <&typec2_con_hs>;
+			};
+		};
+	};
+};
+
+#include "t6040-j616s-usb3.dtsi"

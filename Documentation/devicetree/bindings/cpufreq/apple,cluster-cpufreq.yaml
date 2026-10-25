@@ -22,6 +22,7 @@ properties:
           - enum:
               - apple,t8103-cluster-cpufreq
               - apple,t8112-cluster-cpufreq
+              - apple,t8132-cluster-cpufreq
           - const: apple,cluster-cpufreq
       - items:
           - enum:
@@ -46,6 +47,8 @@ properties:
 
   reg:
     maxItems: 1
+
+  nonposted-mmio: true
 
   apple,fast-die-effort:
     $ref: /schemas/types.yaml#/definitions/phandle-array

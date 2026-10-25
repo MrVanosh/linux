@@ -601,7 +601,7 @@
 		};
 
 		/* Enabled by the boot loader with its firmware and parameters. */
-		sio: sio@289c00000 {
+		sio: dma-controller@289c00000 {
 			compatible = "apple,t6030-sio", "apple,sio";
 			reg = <0x2 0x89c00000 0x0 0x8000>;
 			dma-channels = <128>;

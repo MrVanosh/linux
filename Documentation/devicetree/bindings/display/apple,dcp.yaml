@@ -37,6 +37,11 @@ properties:
       - items:
           - const: apple,t8140-dcpext
           - const: apple,dcp
+      - description:
+          J713 internal display controller (T8132), whose inherited firmware
+          session uses IOMFB 26.6.2. The loader publishes the firmware identity,
+          reserved memory and validated display DART mappings.
+        const: apple,t8132-dcp
 
   reg:
     minItems: 2
@@ -169,6 +174,26 @@ properties:
       the ADT as thirteen little-endian 32-bit words. Linux passes these
       values to the firmware without interpreting or changing them.
 
+  apple,firmware-uuid:
+    $ref: /schemas/types.yaml#/definitions/string
+    description: UUID of the inherited display firmware image.
+
+  apple,j713-native-piodma:
+    type: boolean
+    description: Request loader validation of the inherited J713 PIODMA stream.
+
+  apple,j713-native-scanout:
+    type: boolean
+    description: Request loader validation of the inherited J713 scanout stream.
+
+  apple,panel-width-mm:
+    maxItems: 1
+    description: Physical width of the inherited internal panel.
+
+  apple,panel-height-mm:
+    maxItems: 1
+    description: Physical height of the inherited internal panel.
+
   apple,firmware-version:
     $ref: /schemas/types.yaml#/definitions/uint32-array
     minItems: 3
@@ -221,13 +246,16 @@ properties:
   mux-controls:
     $ref: /schemas/types.yaml#/definitions/phandle-array
     minItems: 1
-    maxItems: 8
+    maxItems: 10
+    description: |
+      T6030 external DCPs may also name the two DP IN tunnel states of each
+      Type-C crossbar, in addition to the fixed output and Type-C routes.
 
   mux-control-names:
     minItems: 1
-    maxItems: 8
+    maxItems: 10
     items:
-      pattern: '^(dp-xbar|typec[0-9]+)$'
+      pattern: '^(dp-xbar|typec[0-9]+(-dpin[01])?)$'
 
   mux-index:
     $ref: /schemas/types.yaml#/definitions/uint32
@@ -253,6 +281,12 @@ properties:
     properties:
       iommus:
         maxItems: 1
+      memory-region:
+        minItems: 1
+        maxItems: 64
+      apple,j713-inherited-mappings:
+        type: boolean
+        description: The loader validated the inherited J713 SID16 PIODMA mapping.
     required:
       - iommus
     additionalProperties: false
@@ -319,9 +353,32 @@ required:
   - reg-names
   - mboxes
   - iommus
-  - apple,bw-scratch
 
 allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: apple,t6030-dcpext
+      required:
+        - compatible
+    else:
+      properties:
+        mux-controls:
+          maxItems: 8
+        mux-control-names:
+          maxItems: 8
+          items:
+            pattern: '^(dp-xbar|typec[0-9]+)$'
+  - if:
+      not:
+        properties:
+          compatible:
+            contains:
+              const: apple,t8132-dcp
+    then:
+      required:
+        - apple,bw-scratch
   - if:
       not:
         properties:

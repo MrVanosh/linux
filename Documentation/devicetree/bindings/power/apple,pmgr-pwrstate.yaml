@@ -11,6 +11,22 @@ maintainers:
 
 allOf:
   - $ref: power-domain.yaml#
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: apple,t8132-pmgr-pwrstate
+      required:
+        - compatible
+        - apple,inherited-on
+    then:
+      properties:
+        apple,firmware-owned: false
+        apple,always-on: false
+        apple,min-state: false
+        apple,force-disable: false
+        apple,force-reset: false
+        apple,externally-clocked: false
 
 description: |
   Apple SoCs include PMGR blocks responsible for power management,
@@ -92,20 +108,28 @@ properties:
 
   apple,firmware-owned:
     description:
-      The boot loader hands over the coprocessor in this domain running, and its
-      firmware owns the domain's power state; writing it faults. The OS keeps the
-      domain on and never changes its power target, automatic gating or reset.
+      The boot loader hands over active hardware whose power domain remains
+      under firmware control. Its state register may not be CPU-accessible.
+      The OS keeps the domain on and never accesses its state register,
+      including reads, power target, automatic gating and reset. Availability
+      is supplied by the firmware handoff rather than determined by probing
+      the power-state register.
     type: boolean
 
   apple,inherited-on:
     description: |
-      The boot loader leaves this domain powered, with the coprocessor it
-      feeds running (the internal display chain of the T6030, T6031 and
-      T8122 MacBook Pros: DISP_SYS, DISP_FE and DISP_CPU). The power state
-      driver treats it as any domain found on; the display handoff requires
-      the marker before it adds the PMP and sets apple,min-state on the
-      chain, so the PMP cannot power the running display coprocessor down.
-      Unlike apple,firmware-owned, the domain's register is still written.
+      On T8132, the boot loader hands over an active domain whose state
+      register can be read, but whose power and reset transitions have not
+      been handed over. Both target and actual state must already be active,
+      with reset, auto-enable, reset-state, busy and device-disable clear.
+      The OS verifies that state, retains an always-on domain, and refuses
+      power-off and reset without writing the register.
+
+      On T6030, T6031 and T8122, this marks the internal display chain left
+      running by the boot loader. The display handoff requires the marker
+      before adding the PMP and setting apple,min-state on that chain.
+      These older domains retain their normal PMGR transition ownership;
+      unlike apple,firmware-owned, their registers remain writable.
     type: boolean
 
   apple,min-state:
