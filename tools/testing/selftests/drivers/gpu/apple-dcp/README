@@ -12,7 +12,13 @@ Or keep translation units, commands, failure logs and source hashes:
 An installed copy needs --source /path/to/kernel. --group edid, rate, phy or
 lifecycle or boot selects one group. HOSTCC selects the host compiler (default clang).
 Python 3 and a compiler supporting AddressSanitizer/UndefinedBehaviorSanitizer
-are required. No target access, firmware command, captured fixture or kernel
+are required. The usb-kconfig producer also needs GNU Make 4 or newer. The
+runner uses MAKE when set, otherwise gmake if available, then make. On macOS,
+install GNU Make or select an existing producer with KCONFIG_CONF. The host
+fixtures use native errno definitions; Linux-only reply statuses stay local
+to the synthetic callback test.
+
+No target access, firmware command, captured fixture or kernel
 configuration is required.
 
 One TAP entry point uses shared production extraction and compiler handling.
