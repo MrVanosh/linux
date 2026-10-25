@@ -1893,119 +1893,30 @@ static int dcp_dptx_connect_tile(struct apple_dcp *dcp)
 
 /*
  * Desktop 26.x external processors (T6041 dcpext0 HDMI, dcpext1 USB-C).
- * They keep the classic external model of the driver this was ported from:
- * no Type-C display fabric, the DPTX link set up on HPD (HDMI) or on the
- * DP alt mode hotplug of the port (USB-C), and the Type-C port chosen
- * dynamically from the PHY that entered DP alt mode.
+ * The DPTX link is set up on HPD (HDMI) or when the Type-C display fabric
+ * routes a port's DP alt mode to the processor (USB-C).
  */
-/* The caller holds hpd_mutex, which also orders dcp->phy against a connect. */
-static int dcp_desktop_dyn_route_select_locked(struct apple_dcp *dcp)
-{
-	struct dcp_desktop_state *d = dcp->desktop;
-	typeof(&apple_t6040_phy_dp_alt) dp_alt;
-	unsigned int i;
-	int ret;
-
-	lockdep_assert_held(&dcp->hpd_mutex);
-	if (!d->ndyn || d->dyn_active >= 0)
-		return 0;
-	/* Looked up at runtime so appledrm does not require the T6040 PHY driver. */
-#if IS_ENABLED(CONFIG_PHY_APPLE_T6040_USB2)
-	dp_alt = symbol_get(apple_t6040_phy_dp_alt);
-#else
-	dp_alt = NULL;
-#endif
-	if (!dp_alt) {
-		dev_dbg(dcp->dev, "T6040 PHY driver not loaded\n");
-		return -ENODEV;
-	}
-	for (i = 0; i < d->ndyn; i++)
-		if (dp_alt(d->dyn_phy[i]))
-			break;
-#if IS_ENABLED(CONFIG_PHY_APPLE_T6040_USB2)
-	symbol_put(apple_t6040_phy_dp_alt);
-#endif
-	if (i == d->ndyn) {
-		dev_dbg(dcp->dev, "no Type-C port in DP alt mode\n");
-		return -ENODEV;
-	}
-	ret = mux_control_select(d->dyn_xbar[i], d->dyn_mux_index);
-	if (ret) {
-		dev_warn(dcp->dev, "Type-C port %u: crossbar select: %d\n", i, ret);
-		return ret;
-	}
-	ret = phy_init(d->dyn_phy[i]);
-	if (!ret) {
-		ret = phy_power_on(d->dyn_phy[i]);
-		if (ret)
-			phy_exit(d->dyn_phy[i]);
-	}
-	if (ret) {
-		dev_warn(dcp->dev, "Type-C port %u: DP PHY init/power: %d\n", i, ret);
-		mux_control_deselect(d->dyn_xbar[i]);
-		return ret;
-	}
-	msleep(25);
-	dcp->phy = d->dyn_phy[i];
-	dcp->xbar = d->dyn_xbar[i];
-	dcp->dptx_phy = d->dyn_dptx_phy[i];
-	d->dyn_active = i;
-	dev_dbg(dcp->dev, "Type-C port %u selected (DPTX target PHY %u, crossbar state %u)\n",
-		i, dcp->dptx_phy, d->dyn_mux_index);
-	return 0;
-}
-
-static void dcp_desktop_dyn_route_release_locked(struct apple_dcp *dcp)
-{
-	struct dcp_desktop_state *d = dcp->desktop;
-	int i = d->dyn_active;
-
-	lockdep_assert_held(&dcp->hpd_mutex);
-	if (!d->ndyn || i < 0)
-		return;
-	d->dyn_active = -1;
-	dcp->phy = NULL;
-	dcp->xbar = NULL;
-	phy_power_off(d->dyn_phy[i]);
-	phy_exit(d->dyn_phy[i]);
-	mux_control_deselect(d->dyn_xbar[i]);
-	dev_dbg(dcp->dev, "Type-C port %u released\n", i);
-}
-
-/* Unbind: a selected route holds its crossbar and its powered PHY. */
-static void dcp_desktop_dyn_route_release(struct apple_dcp *dcp)
-{
-	if (!dcp->desktop)
-		return;
-	guard(mutex)(&dcp->hpd_mutex);
-	dcp_desktop_dyn_route_release_locked(dcp);
-}
-
 static int dcp_desktop_dptx_connect(struct apple_dcp *dcp, u32 port)
 {
 	struct dptx_port *dptx = &dcp->dptxport[port];
 	unsigned long left;
-	bool selected;
 	int ret = 0;
 
 	mutex_lock(&dcp->hpd_mutex);
-	/* A route selected here is released again if the connect fails. */
-	selected = !dcp->phy && dcp->desktop->ndyn;
-	if (selected) {
-		ret = dcp_desktop_dyn_route_select_locked(dcp);
-		if (ret)
-			goto out_unlock;
-	}
 	if (!dcp->phy) {
 		dev_warn(dcp->dev, "dcp_dptx_connect: missing phy\n");
 		ret = -ENODEV;
 		goto out_unlock;
 	}
+	/* A fabric route powers its PHY here (a no-op for the other routes). */
+	ret = dcp_typec_phy_on(dcp);
+	if (ret)
+		goto out_unlock;
 	if (!dptx_service_available(dptx)) {
 		dev_warn(dcp->dev, "dcp_dptx_connect: dptx service for port %u not enabled\n",
 			 port);
 		ret = -ENODEV;
-		goto out_release;
+		goto out_unlock;
 	}
 	if (dptx->connected)
 		goto out_unlock;
@@ -2015,13 +1926,13 @@ static int dcp_desktop_dptx_connect(struct apple_dcp *dcp, u32 port)
 	ret = dptxport_connect(dptx->service, 0, dcp->dptx_phy, dcp->dptx_die, true);
 	if (ret) {
 		dev_warn(dcp->dev, "DPTX port %u: connect failed: %d\n", port, ret);
-		goto out_release;
+		goto out_unlock;
 	}
 	ret = dptxport_request_display(dptx->service);
 	if (ret) {
 		dev_warn(dcp->dev, "DPTX port %u: display request failed: %d\n",
 			 port, ret);
-		goto out_release;
+		goto out_unlock;
 	}
 	dptx->connected = true;
 
@@ -2050,9 +1961,6 @@ static int dcp_desktop_dptx_connect(struct apple_dcp *dcp, u32 port)
 		av_service_connect(dcp);
 	return 0;
 
-out_release:
-	if (selected)
-		dcp_desktop_dyn_route_release_locked(dcp);
 out_unlock:
 	mutex_unlock(&dcp->hpd_mutex);
 	return ret;
@@ -2070,8 +1978,6 @@ static int dcp_desktop_dptx_disconnect_oob(struct apple_dcp *dcp, u32 port)
 			dptxport_set_hpd(dcp->dptxport[port].service, false);
 	}
 	ret = dcp_dptx_disconnect(dcp, port);
-	scoped_guard(mutex, &dcp->hpd_mutex)
-		dcp_desktop_dyn_route_release_locked(dcp);
 	if (!dcp->main_display)
 		dcp->desktop->ext_pipe_off = true;
 	return ret;
@@ -3142,7 +3048,7 @@ static int dcp_start_desktop_external(struct apple_dcp *dcp, u32 map)
 	if (ret)
 		return ret;
 
-	if (!dcp->phy && !d->ndyn) {
+	if (!dcp->phy) {
 		dev_warn(dcp->dev, "no DP PHY and no Type-C route: no display link\n");
 		return 0;
 	}
@@ -4975,8 +4881,6 @@ VISIBLE_IF_KUNIT void dcp_comp_unbind(struct device *dev, struct device *main, v
 		dcp->systemep = NULL;
 	}
 
-	dcp_desktop_dyn_route_release(dcp);
-
 	/*
 	 * The auxiliary endpoints a desktop 26.x start brought up, still
 	 * routed while their shutdown is acknowledged.
@@ -5087,62 +4991,31 @@ static void dcp_desktop_phy_off(void *data)
 }
 
 /*
- * The outputs of a desktop 26.x external processor (T6041 dcpext): the
- * fixed HDMI route's DP PHY is powered here, as the boot loader's working
- * sequence does; a dynamic Type-C route lists the DP PHY and crossbar of
- * every port (dp-phyN, dp-xbarN, apple,dptx-phys, apple,dptx-mux-index),
- * and the one in DP alt mode is claimed at connect.
+ * The fixed HDMI output of a desktop 26.x external processor (T6041 dcpext0):
+ * its DP PHY is powered here, as the boot loader's working sequence does. A
+ * Type-C output (dcpext1) has no fixed PHY; the display fabric powers the
+ * PHY of the route a port claims (see dcp_typec_phy_on()).
  */
 static int dcp_desktop_probe_routes(struct apple_dcp *dcp)
 {
-	struct dcp_desktop_state *d = dcp->desktop;
 	struct device *dev = dcp->dev;
-	unsigned int i;
-	int nd, ret;
+	int ret;
 
-	d->dyn_active = -1;
-	if (!dcp_desktop_external(dcp))
+	if (!dcp_desktop_external(dcp) || !dcp->phy)
 		return 0;
 
-	if (dcp->phy) {
-		ret = phy_init(dcp->phy);
-		if (ret)
-			return dev_err_probe(dev, ret, "Failed to initialize dp-phy\n");
-		ret = phy_power_on(dcp->phy);
-		if (ret) {
-			phy_exit(dcp->phy);
-			return dev_err_probe(dev, ret, "Failed to power on dp-phy\n");
-		}
-		ret = devm_add_action_or_reset(dev, dcp_desktop_phy_off, dcp->phy);
-		if (ret)
-			return ret;
-		msleep(25);
+	ret = phy_init(dcp->phy);
+	if (ret)
+		return dev_err_probe(dev, ret, "Failed to initialize dp-phy\n");
+	ret = phy_power_on(dcp->phy);
+	if (ret) {
+		phy_exit(dcp->phy);
+		return dev_err_probe(dev, ret, "Failed to power on dp-phy\n");
 	}
-
-	nd = of_property_count_u32_elems(dev->of_node, "apple,dptx-phys");
-	if (nd <= 0)
-		return 0;
-	if (nd > ARRAY_SIZE(d->dyn_phy))
-		return dev_err_probe(dev, -EINVAL, "too many Type-C routes: %d\n", nd);
-
-	for (i = 0; i < nd; i++) {
-		char name[16];
-
-		snprintf(name, sizeof(name), "dp-phy%u", i);
-		d->dyn_phy[i] = devm_phy_get(dev, name);
-		if (IS_ERR(d->dyn_phy[i]))
-			return dev_err_probe(dev, PTR_ERR(d->dyn_phy[i]), "%s\n", name);
-		snprintf(name, sizeof(name), "dp-xbar%u", i);
-		d->dyn_xbar[i] = devm_mux_control_get(dev, name);
-		if (IS_ERR(d->dyn_xbar[i]))
-			return dev_err_probe(dev, PTR_ERR(d->dyn_xbar[i]), "%s\n", name);
-		of_property_read_u32_index(dev->of_node, "apple,dptx-phys", i,
-					   &d->dyn_dptx_phy[i]);
-	}
-	of_property_read_u32(dev->of_node, "apple,dptx-mux-index", &d->dyn_mux_index);
-	d->ndyn = nd;
-	dev_info(dev, "%u Type-C DP routes, crossbar state %u\n", d->ndyn,
-		 d->dyn_mux_index);
+	ret = devm_add_action_or_reset(dev, dcp_desktop_phy_off, dcp->phy);
+	if (ret)
+		return ret;
+	msleep(25);
 	return 0;
 }
 

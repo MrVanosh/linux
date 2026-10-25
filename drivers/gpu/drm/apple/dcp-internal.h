@@ -270,17 +270,6 @@ struct dcp_desktop_state {
 	 * display (unplug); the next swap needs a power-on and a mode set.
 	 */
 	bool ext_pipe_off;
-	/*
-	 * Dynamic Type-C DP route (T6041 dcpext1): the DP PHYs and crossbars
-	 * of every Type-C port, the one in use (or -1), the DPTX target PHY
-	 * of each and the crossbar state selecting this processor.
-	 */
-	unsigned int ndyn;
-	int dyn_active;
-	struct phy *dyn_phy[3];
-	struct mux_control *dyn_xbar[3];
-	u32 dyn_dptx_phy[3];
-	u32 dyn_mux_index;
 };
 
 /* TODO: move IOMFB members to its own struct */
