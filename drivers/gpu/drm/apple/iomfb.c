@@ -1428,6 +1428,15 @@ static void dcpep_handle_cb(struct apple_dcp *dcp, enum dcp_context_id context,
 
 	handled = tag >= 0 && tag < IOMFB_MAX_CB && dcp->cb_handlers &&
 		  dcp->cb_handlers[tag];
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP && handled &&
+	    (length < sizeof(*hdr) ||
+	     (u64)sizeof(*hdr) + hdr->in_len + hdr->out_len > length ||
+	     !iomfb_check_callback_v26_6_desktop(tag, hdr->in_len, hdr->out_len))) {
+		dev_err(dev, "short IOMFB callback %d (%u, %u, length %u)\n",
+			tag, hdr->in_len, hdr->out_len, length);
+		dcp->crashed = true;
+		return;
+	}
 	if (dcp->fw_compat == DCP_FIRMWARE_H17P &&
 	    (tag < 0 || tag >= IOMFB_MAX_CB ||
 	     (u64)sizeof(*hdr) + hdr->in_len + hdr->out_len != length ||
