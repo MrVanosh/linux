@@ -490,6 +490,8 @@ def bounce(root):
     m = re.search(r'^static int dcp_dptx_connect_raw\(', dcp, re.M)
     assert m, 'dcp_dptx_connect_raw'
     raw = block(dcp, m.start())
+    # Compact DPTX is the desktop 26.x wire; this scenario's endpoint is not.
+    raw = raw.replace('READ_ONCE(dcp->dptxport[port].service->ep->compact)', 'false')
 
     def swap(old, new):
         nonlocal unit
@@ -510,6 +512,8 @@ def bounce(root):
     swap(old_raw, 'static int dcp_dptx_connect_raw(struct apple_dcp *, u32, bool *' +
          (', const struct dcp_fabric_session *, bool, bool' if sessions else '') + ');')
     swap('static int dptxport_set_hpd(void *p, bool on)\n{ (void)p; assert(!on); return hpd_error; }',
+         '/* The route powers a desktop 26.x PHY at connect: nothing to do for this scenario. */\n'
+         'static int __attribute__((unused)) dcp_typec_phy_on(struct apple_dcp *d) { (void)d; return 0; }\n'
          'static bool fw_hpd, fw_display, link_trains;\n'
          'static int hpd_drops, connects, release_error_once, assert_error;\n'
          '/* A request that times out may still be carried out; a refused one is not. */\n'
