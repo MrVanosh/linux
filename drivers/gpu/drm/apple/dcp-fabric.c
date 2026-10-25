@@ -103,7 +103,11 @@ static bool dcp_hdmi_borrowed(void *ctx);
 
 bool dcp_is_typec_output(struct apple_dcp *dcp)
 {
-	/* Desktop 26.x keeps its own Type-C route, outside this fabric. */
+	/*
+	 * Desktop 26.x takes its Type-C route from this fabric but drives the
+	 * link through its own compact DPTX connect (dcp_desktop_dptx_connect()),
+	 * not the Type-C output session below.
+	 */
 	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP)
 		return false;
 	return dcp->active_typec_route ||
