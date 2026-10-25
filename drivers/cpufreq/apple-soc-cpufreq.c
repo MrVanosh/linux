@@ -110,7 +110,10 @@
  * running, the hrtimer only checks every 100 ms, and every second once the
  * warning has been given.  A nohz_full CPU can run a task with its tick
  * stopped, and so without sampling, so a cluster with nohz_full CPUs
- * samples from the hrtimer all the time.
+ * samples from the hrtimer all the time.  Where schedutil switches frequency
+ * from the scheduler (fast switch), a lower limit reaches the cluster at its
+ * next scheduler frequency update rather than at once, which a nohz_full CPU
+ * running with its tick stopped may not have for a long time.
  *
  * A sample reads the effort through the PMP report driver; only when the
  * limit it maps to changes is a work item queued to update the QoS request,
@@ -187,6 +190,7 @@ static int apple_fast_die_hp_state;
 struct apple_soc_cpufreq_info {
 	bool has_ps2;
 	bool verify_transition;
+	bool lazy_verify;
 	/* Fail closed when the DT describes no fast die-temperature limit. */
 	bool needs_thermal_policy;
 	bool needs_thermal_owner;
@@ -243,12 +247,17 @@ static const struct apple_soc_cpufreq_info soc_t8112_info = {
 
 /*
  * T8140 uses 5-bit PS1 state IDs starting at 1. The command register reads
- * back the last accepted request, not a measured frequency; every transition
- * is verified, see apple_soc_cpufreq_set_target(). Voltage, PLL and firmware
- * throttling configuration are left as the bootloader set them.
+ * back the last accepted request, not a measured frequency; each request is
+ * verified, see apple_soc_cpufreq_request(). Requests from the scheduler's
+ * fast-switch path are verified when the next one is issued rather than
+ * waited for, so schedutil can switch from the scheduler; requests through
+ * ->target_index (suspend, the static governors) are still waited for.
+ * Voltage, PLL and firmware throttling configuration are left as the
+ * bootloader set them.
  */
 static const struct apple_soc_cpufreq_info soc_t8140_info = {
 	.verify_transition = true,
+	.lazy_verify = true,
 	.needs_thermal_policy = true,
 	.min_pstate = 1,
 	.max_pstate = 31,
@@ -378,8 +387,14 @@ static unsigned int apple_soc_cpufreq_get_rate(unsigned int cpu)
 	return 0;
 }
 
-static int apple_soc_cpufreq_set_target(struct cpufreq_policy *policy,
-					unsigned int index)
+/*
+ * Requests the frequency table entry @index. With @wait, a SoC that verifies
+ * transitions waits for this one to be accepted; without it, the next request
+ * checks it: it waits for BUSY to clear and requires the accepted state to
+ * match.
+ */
+static int apple_soc_cpufreq_request(struct cpufreq_policy *policy,
+				     unsigned int index, bool wait)
 {
 	struct apple_cpu_priv *priv = policy->driver_data;
 	unsigned int pstate = policy->freq_table[index].driver_data;
@@ -424,7 +439,7 @@ static int apple_soc_cpufreq_set_target(struct cpufreq_policy *policy,
 
 	writeq_relaxed(reg, priv->reg_base + APPLE_DVFS_CMD);
 
-	if (priv->info->verify_transition &&
+	if (priv->info->verify_transition && wait &&
 	    readq_poll_timeout_atomic(priv->reg_base + APPLE_DVFS_CMD, reg,
 				      !(reg & APPLE_DVFS_CMD_BUSY) &&
 				      FIELD_GET(APPLE_DVFS_CMD_PS1, reg) == pstate,
@@ -441,13 +456,26 @@ static int apple_soc_cpufreq_set_target(struct cpufreq_policy *policy,
 	return 0;
 }
 
+static int apple_soc_cpufreq_set_target(struct cpufreq_policy *policy,
+					unsigned int index)
+{
+	return apple_soc_cpufreq_request(policy, index, true);
+}
+
 static unsigned int apple_soc_cpufreq_fast_switch(struct cpufreq_policy *policy,
 						  unsigned int target_freq)
 {
-	if (apple_soc_cpufreq_set_target(policy, policy->cached_resolved_idx) < 0)
+	struct apple_cpu_priv *priv = policy->driver_data;
+	/*
+	 * Resolve the index here: policy->cached_resolved_idx can be rewritten
+	 * by a concurrent limits update. target_freq is already clamped.
+	 */
+	int idx = cpufreq_table_find_index_l(policy, target_freq, false);
+
+	if (idx < 0 || apple_soc_cpufreq_request(policy, idx, !priv->info->lazy_verify) < 0)
 		return 0;
 
-	return policy->freq_table[policy->cached_resolved_idx].frequency;
+	return policy->freq_table[idx].frequency;
 }
 
 static int apple_soc_cpufreq_find_cluster(struct cpufreq_policy *policy,
@@ -1014,7 +1042,7 @@ static int apple_soc_cpufreq_init(struct cpufreq_policy *policy)
 
 	policy->cpuinfo.transition_latency = transition_latency;
 	policy->dvfs_possible_from_any_cpu = true;
-	policy->fast_switch_possible = !info->verify_transition;
+	policy->fast_switch_possible = !info->verify_transition || info->lazy_verify;
 	policy->suspend_freq = freq_table[0].frequency;
 
 	return 0;
