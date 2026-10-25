@@ -1902,15 +1902,29 @@ static int dcp_dptx_connect_tile(struct apple_dcp *dcp)
 static int dcp_desktop_dyn_route_select_locked(struct apple_dcp *dcp)
 {
 	struct dcp_desktop_state *d = dcp->desktop;
+	typeof(&apple_t6040_phy_dp_alt) dp_alt;
 	unsigned int i;
 	int ret;
 
 	lockdep_assert_held(&dcp->hpd_mutex);
 	if (!d->ndyn || d->dyn_active >= 0)
 		return 0;
+	/* Looked up at runtime so appledrm does not require the T6040 PHY driver. */
+#if IS_ENABLED(CONFIG_PHY_APPLE_T6040_USB2)
+	dp_alt = symbol_get(apple_t6040_phy_dp_alt);
+#else
+	dp_alt = NULL;
+#endif
+	if (!dp_alt) {
+		dev_dbg(dcp->dev, "T6040 PHY driver not loaded\n");
+		return -ENODEV;
+	}
 	for (i = 0; i < d->ndyn; i++)
-		if (apple_t6040_phy_dp_alt(d->dyn_phy[i]))
+		if (dp_alt(d->dyn_phy[i]))
 			break;
+#if IS_ENABLED(CONFIG_PHY_APPLE_T6040_USB2)
+	symbol_put(apple_t6040_phy_dp_alt);
+#endif
 	if (i == d->ndyn) {
 		dev_dbg(dcp->dev, "no Type-C port in DP alt mode\n");
 		return -ENODEV;
