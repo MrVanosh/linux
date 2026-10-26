@@ -47,7 +47,7 @@ MODULE_PARM_DESC(panel_identity_debug, "Bounded desktop panel property keys and 
 
 struct dcp_identity_trace {
 	struct apple_dcp *dcp;
-	u32 *count;
+	atomic_t *count;
 };
 
 static void dcp_identity_key_log(void *data, const char *key, u32 key_len,
@@ -58,12 +58,11 @@ static void dcp_identity_key_log(void *data, const char *key, u32 key_len,
 	char safe[65];
 	u32 i;
 
-	if (*trace->count >= 128)
+	if (!atomic_add_unless(trace->count, 1, 128))
 		return;
 	for (i = 0; i < min_t(u32, key_len, sizeof(safe) - 1); i++)
 		safe[i] = key[i] >= 0x20 && key[i] <= 0x7e ? key[i] : '?';
 	safe[i] = 0;
-	++*trace->count;
 	dev_info(dcp->dev, "panel identity depth=%u key=%s type=%u size=%u\n",
 		 depth, safe, type, size);
 }
@@ -81,7 +80,7 @@ void dcp_trace_panel_property(struct apple_dcp *dcp, int tag, const char *key,
 	trace.dcp = dcp;
 	trace.count = &dcp->desktop->identity_log_count[slot];
 	/* Periodic statistics cannot consume the panel setters' budget. */
-	if (*trace.count >= 128)
+	if (!atomic_add_unless(trace.count, 1, 128))
 		return;
 	dev_info(dcp->dev, "panel identity callback=D%03d bytes=%zu null=%d\n",
 		 tag, len, !blob);

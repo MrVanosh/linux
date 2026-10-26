@@ -848,10 +848,14 @@ def identity_trace_budget(root):
 #include <stdarg.h>
 #include <string.h>
 typedef uint32_t u32;
+typedef struct {int value;} atomic_t;
+static int atomic_read(const atomic_t *n) {return n->value;}
+static bool atomic_add_unless(atomic_t *n,int add,int unless)
+{if(n->value==unless)return false;n->value+=add;return true;}
 #define READ_ONCE(x) (x)
 #define min_t(t,a,b) ((t)(a)<(t)(b)?(t)(a):(t)(b))
 #define DCP_FIRMWARE_V_26_6_DESKTOP 5
-struct apple_dcp {int fw_compat;bool has_panel;void *dev;struct {u32 identity_log_count[4];} *desktop;};
+struct apple_dcp {int fw_compat;bool has_panel;void *dev;struct {atomic_t identity_log_count[4];} *desktop;};
 static bool panel_identity_debug;
 static unsigned messages;
 static char output[256];
@@ -884,18 +888,18 @@ int main(void)
     dcp_trace_panel_property(&d,561,"Property",8,secret,sizeof(secret));assert(!messages);
     d.has_panel=true;
     for(unsigned i=0;i<100;i++)dcp_trace_panel_property(&d,114,"Statistics",10,secret,sizeof(secret));
-    assert(desktop.identity_log_count[2]==128 && !desktop.identity_log_count[0] && !desktop.identity_log_count[1]);
+    assert(atomic_read(&desktop.identity_log_count[2])==128 && !atomic_read(&desktop.identity_log_count[0]) && !atomic_read(&desktop.identity_log_count[1]));
     unsigned before=messages;
     dcp_trace_panel_property(&d,552,"Panel",5,secret,sizeof(secret));assert(messages>before);
     dcp_trace_panel_property(&d,561,"Panel",5,secret,sizeof(secret));
-    assert(desktop.identity_log_count[0] && desktop.identity_log_count[1]);
+    assert(atomic_read(&desktop.identity_log_count[0]) && atomic_read(&desktop.identity_log_count[1]));
     assert(strstr(output,"Key?") && !strstr(output,secret));
     for(unsigned i=0;i<100;i++) {
         dcp_trace_panel_property(&d,552,"Panel",5,secret,sizeof(secret));
         dcp_trace_panel_property(&d,561,"Panel",5,secret,sizeof(secret));
         dcp_trace_panel_property(&d,0,"Chunks",6,secret,sizeof(secret));
     }
-    for(unsigned i=0;i<4;i++)assert(desktop.identity_log_count[i]==128);
+    for(unsigned i=0;i<4;i++)assert(atomic_read(&desktop.identity_log_count[i])==128);
     before=messages;dcp_trace_panel_property(&d,561,"Panel",5,NULL,0);assert(messages==before);
     assert(messages<=520);
     return 0;
