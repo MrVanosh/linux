@@ -121,13 +121,24 @@ static void dcp_backlight_notify_work(struct work_struct *work)
 {
 	struct apple_dcp *dcp = container_of(work, struct apple_dcp, backlight.notify_work);
 	struct backlight_device *bd = READ_ONCE(dcp->brightness.bl_dev);
-	char *envp[] = { "SOURCE=unknown", NULL };
+	char *envp[2];
 
 	if (!bd || READ_ONCE(dcp->quiescing))
 		return;
+	envp[0] = "SOURCE=unknown";
+	envp[1] = NULL;
 	kobject_uevent_env(&bd->dev.kobj, KOBJ_CHANGE, envp);
 	sysfs_notify(&bd->dev.kobj, NULL, "brightness");
 	sysfs_notify(&bd->dev.kobj, NULL, "actual_brightness");
+}
+
+/* Run before the later-registered backlight devres unregisters the device. */
+static void dcp_backlight_notify_release(void *data)
+{
+	struct apple_dcp *dcp = data;
+
+	WRITE_ONCE(dcp->brightness.bl_dev, NULL);
+	cancel_work_sync(&dcp->backlight.notify_work);
 }
 
 static void dcp_backlight_notify(struct apple_dcp *dcp)
@@ -722,6 +733,7 @@ int dcp_backlight_register(struct apple_dcp *dcp)
 {
 	struct device *dev = dcp->dev;
 	struct backlight_device *bl_dev;
+	int ret;
 	unsigned long flags;
 	struct backlight_properties props = {
 		.type = BACKLIGHT_PLATFORM,
@@ -781,7 +793,13 @@ int dcp_backlight_register(struct apple_dcp *dcp)
 	if (IS_ERR(bl_dev))
 		return PTR_ERR(bl_dev);
 
-	dcp->brightness.bl_dev = bl_dev;
+	/* LIFO devres order drains event work before unregistering the backlight. */
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP) {
+		ret = devm_add_action_or_reset(dev, dcp_backlight_notify_release, dcp);
+		if (ret)
+			return ret;
+	}
+	WRITE_ONCE(dcp->brightness.bl_dev, bl_dev);
 	/* A hint may have arrived between the property snapshot and registration. */
 	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP)
 		dcp_backlight_sync_hint(dcp);

@@ -1341,6 +1341,11 @@ static int parse_panel_label(struct dcp_parse_ctx *handle, char out[14])
 		length = 13;
 	memcpy(out, value, length);
 	out[length] = 0;
+	/* A blank descriptor is absent to libdisplay-info; use the fallback. */
+	for (unsigned int i = 0; i < length; i++)
+		if (out[i] != ' ')
+			return 0;
+	out[0] = 0;
 	return 0;
 }
 
@@ -2006,7 +2011,7 @@ int parse_system_log_mnits(struct dcp_parse_ctx *handle, struct dcp_system_ev_mn
 
 /* Inspect structure only. Never emit a firmware value or allocate from its size. */
 static int parse_identity_tree(struct dcp_parse_ctx *ctx, dcp_identity_key_fn emit,
-                              void *data, u32 depth, u32 *budget)
+			       void *data, u32 depth, u32 *budget)
 {
 	const struct dcp_parse_tag *tag;
 	u32 count;
@@ -2072,7 +2077,7 @@ int parse_identity_keys(const void *blob, size_t len, dcp_identity_key_fn emit, 
 
 /* Look for named EDID blobs inside bounded property dictionaries. */
 static int parse_panel_edid_value(struct dcp_parse_ctx *ctx, u32 depth, u32 *budget,
-                                 bool edid_key, const u8 **edid, size_t *size)
+				  bool edid_key, const u8 **edid, size_t *size)
 {
 	const struct dcp_parse_tag *tag;
 	struct dcp_parse_ctx start = *ctx;
@@ -2102,11 +2107,12 @@ static int parse_panel_edid_value(struct dcp_parse_ctx *ctx, u32 depth, u32 *bud
 		if (tag->size > *budget)
 			return -E2BIG;
 		for (u32 i = 0; i < tag->size; i++) {
-			const struct dcp_parse_tag *key_tag = parse_tag_of_type(ctx, DCP_TYPE_STRING);
+			const struct dcp_parse_tag *key_tag;
 			const char *key;
 			bool match;
 			int ret;
 
+			key_tag = parse_tag_of_type(ctx, DCP_TYPE_STRING);
 			if (IS_ERR(key_tag))
 				return PTR_ERR(key_tag);
 			key = parse_bytes(ctx, key_tag->size);

@@ -40,7 +40,7 @@ static u32 dcp_adt_serial(const u8 *data, size_t size)
 }
 
 static void dcp_adt_panel_property(struct dcp_panel_adt *panel, const char *name,
-				 const u8 *value, u32 size)
+				   const u8 *value, u32 size)
 {
 	struct dcp_display_metadata *id = &panel->identity;
 	u32 number = size == 4 ? get_unaligned_le32(value) : 0;

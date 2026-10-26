@@ -46,7 +46,7 @@ module_param(panel_identity_debug, bool, 0600);
 MODULE_PARM_DESC(panel_identity_debug, "Bounded desktop panel property keys and types (no values)");
 
 static void dcp_identity_key_log(void *data, const char *key, u32 key_len,
-                                 u32 type, u32 size, u32 depth)
+				 u32 type, u32 size, u32 depth)
 {
 	struct apple_dcp *dcp = data;
 	char safe[65];
@@ -63,7 +63,7 @@ static void dcp_identity_key_log(void *data, const char *key, u32 key_len,
 }
 
 void dcp_trace_panel_property(struct apple_dcp *dcp, int tag, const char *key,
-                              size_t key_len, const void *blob, size_t len)
+			      size_t key_len, const void *blob, size_t len)
 {
 	int ret;
 

@@ -874,6 +874,8 @@ static bool dcp_panel_edid_has_identity(const u8 *raw)
 	bool model = raw[10] || raw[11];
 	bool serial = raw[12] || raw[13] || raw[14] || raw[15];
 
+	if (vendor & 0x8000)
+		return false;
 	for (u32 shift = 0; shift <= 10; shift += 5)
 		if (!((vendor >> shift) & 31) || ((vendor >> shift) & 31) > 26)
 			return false;
@@ -952,7 +954,7 @@ const struct drm_edid *dcp_panel_edid_snapshot(struct apple_dcp *dcp,
 	size_t size;
 	unsigned long flags;
 
-	raw = kmalloc(sizeof(dcp->desktop->panel_raw_edid), GFP_KERNEL);
+	raw = kmalloc_objs(u8, sizeof(dcp->desktop->panel_raw_edid), GFP_KERNEL);
 	if (!raw)
 		return ERR_PTR(-ENOMEM);
 	spin_lock_irqsave(&dcp->metadata.lock, flags);

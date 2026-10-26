@@ -50,7 +50,7 @@ typedef u64 dma_addr_t;
 #define trace_iomfb_callback(...) ((void)0)
 #define dcp_trace_panel_property(...) ((void)0)
 #define GFP_KERNEL 0
-#define kmalloc(n,f) malloc(n)
+#define kmalloc_objs(t,n,f) malloc(sizeof(t)*(n))
 #define dev_warn_dma(...) ((void)0)
 struct dcp_map_physical_req {u64 paddr,size;u32 flags;u8 dva_null,dva_size_null,padding[2];} __attribute__((packed));
 struct dcp_map_physical_resp {u64 dva,dva_size;u32 mem_desc_id;} __attribute__((packed));
@@ -210,6 +210,7 @@ def brightness_takeover(root):
 #include <stddef.h>
 #include <string.h>
 #define READ_ONCE(x) (x)
+#define WRITE_ONCE(x,v) ((x)=(v))
 #define DCP_FIRMWARE_V_26_6_DESKTOP 5
 #define DCP_FIRMWARE_H17P 1
 #define DCP_IOMFB_METHODS_H17G 7
@@ -218,6 +219,7 @@ def brightness_takeover(root):
 #define BACKLIGHT_SCALE_LINEAR 1
 #define BL_CORE_SUSPENDED 1
 #define BL_CORE_FBBLANK 2
+#define devm_add_action_or_reset(...) (0)
 #define DCP_BL_FADE_STEP_MS 16
 #define system_dfl_wq NULL
 #define IS_ERR(p) false
@@ -375,7 +377,7 @@ def panel_identity(root, output=None):
                                         'SerialNumber': 0x12345678}}
     raw = bytearray(struct.pack('<I', 0xd3)); f['wire'](attributes, raw)
     product = bytearray(struct.pack('<I', 0xd3)); f['wire'](attributes['ProductAttributes'], product)
-    minimal = bytearray(struct.pack('<I', 0xd3)); f['wire']({'LegacyManufacturerID': 0x5274, 'ProductID': 42, 'WeekOfManufacture': 0, 'YearOfManufacture': 0}, minimal)
+    minimal = bytearray(struct.pack('<I', 0xd3)); f['wire']({'LegacyManufacturerID': 0x5274, 'ProductID': 42, 'WeekOfManufacture': 0, 'YearOfManufacture': 0, 'ProductName': '    ', 'AlphanumericSerialNumber': '    '}, minimal)
     code = (f['prefix'] + f['metadata'] + f['epoch'].replace('static inline ', 'static inline __attribute__((unused)) ') + f['header'] +
             f['edid_header'] + f['parser'] + f['stubs'] + f['builder'])
     source = (root / 'drivers/gpu/drm/apple/dcp.c').read_text()
@@ -395,7 +397,7 @@ def panel_identity(root, output=None):
 #define trace_iomfb_callback(...) ((void)0)
 #define dcp_trace_panel_property(...) ((void)0)
 #define GFP_KERNEL 0
-#define kmalloc(n,f) malloc(n)
+#define kmalloc_objs(t,n,f) malloc(sizeof(t)*(n))
 #define spin_lock_irqsave(p,f) do {assert(!*(p));*(p)=true;(f)=0;} while(0)
 #define spin_unlock_irqrestore(p,f) do {assert(*(p));*(p)=false;(void)(f);} while(0)
 struct apple_dcp {
@@ -560,6 +562,7 @@ def powerlog_framing(root):
 #define DCP_FIRMWARE_V_26_6_DESKTOP 5
 #define DCP_IOMFB_METHODS_H17G 7
 #define READ_ONCE(x) (x)
+#define WRITE_ONCE(x,v) ((x)=(v))
 #define dev_dbg(...) ((void)0)
 #define dev_warn(...) ((void)0)
 #define __le64 u64
@@ -772,12 +775,13 @@ def brightness_notifications(root):
     prefix=prefix.replace('static inline ', 'static inline __attribute__((unused)) ')
     source=(root/'drivers/gpu/drm/apple/dcp_backlight.c').read_text()
     functions='\n'.join(block(source,name) for name in (
-        'static void dcp_backlight_notify_work(', 'static void dcp_backlight_notify(',
+        'static void dcp_backlight_notify_work(', 'static void dcp_backlight_notify_release(', 'static void dcp_backlight_notify(',
         'static bool dcp_backlight_desktop(', 'void dcp_backlight_desktop_finish('))
     return prefix+r'''
 #include <stddef.h>
 #include <string.h>
 #define READ_ONCE(x) (x)
+#define WRITE_ONCE(x,v) ((x)=(v))
 #define DCP_FIRMWARE_V_26_6_DESKTOP 5
 #define spin_lock_irqsave(p,f) do {assert(!*(p));*(p)=true;(f)=0;} while(0)
 #define spin_unlock_irqrestore(p,f) do {assert(*(p));*(p)=false;(void)(f);} while(0)
@@ -793,7 +797,8 @@ struct apple_dcp {
     struct {bool lock;struct dcp_backlight_state state;struct work_struct notify_work;int retry_work;} backlight;
     struct {struct dcp_backlight_swap backlight;} *desktop;
 };
-static unsigned events,brightness,actual,kicks;
+static unsigned events,brightness,actual,kicks,cancelled;
+static void cancel_work_sync(struct work_struct *w) {(void)w;cancelled++;}
 static void kobject_uevent_env(int *k,int action,char **env)
 {(void)k;assert(action==1 && !strcmp(env[0],"SOURCE=unknown") && !env[1]);events++;}
 static void sysfs_notify(int *k,void *dir,const char *name)
@@ -823,7 +828,8 @@ int main(void)
     dcp_backlight_desktop_finish(&d,9,true,false);assert(events==1);
     d.quiescing=true;dcp_backlight_notify(&d);assert(events==1);
     d.quiescing=false;d.fw_compat=1;dcp_backlight_notify(&d);assert(events==1);
-    d.fw_compat=5;d.brightness.bl_dev=NULL;dcp_backlight_notify(&d);assert(events==1);
+    d.fw_compat=5;dcp_backlight_notify_release(&d);
+    assert(!d.brightness.bl_dev && cancelled==1);dcp_backlight_notify(&d);assert(events==1);
     return 0;
 }
 '''

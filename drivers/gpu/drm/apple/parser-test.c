@@ -1394,7 +1394,7 @@ static void parser_panel_identity_stable(struct kunit *test)
 }
 
 static void parser_identity_emit(void *data, const char *key, u32 len,
-                                 u32 type, u32 size, u32 depth)
+				 u32 type, u32 size, u32 depth)
 {
 	u32 *seen = data;
 
@@ -1405,13 +1405,15 @@ static void parser_identity_bounds(struct kunit *test)
 {
 	u32 seen = 0;
 	__le32 huge[] = { cpu_to_le32(0xd3), cpu_to_le32(0x01ffffff) };
+	int ret;
 
-	KUNIT_EXPECT_EQ(test, parse_identity_keys(huge, sizeof(huge),
-			parser_identity_emit, &seen), -E2BIG);
+	ret = parse_identity_keys(huge, sizeof(huge), parser_identity_emit, &seen);
+	KUNIT_EXPECT_EQ(test, ret, -E2BIG);
 	KUNIT_EXPECT_EQ(test, seen, 1U);
-	for (u32 len = 0; len < sizeof(huge); len++)
-		KUNIT_EXPECT_LT(test, parse_identity_keys(huge, len,
-				parser_identity_emit, &seen), 0);
+	for (u32 len = 0; len < sizeof(huge); len++) {
+		ret = parse_identity_keys(huge, len, parser_identity_emit, &seen);
+		KUNIT_EXPECT_LT(test, ret, 0);
+	}
 }
 
 static void parser_adt_bounds(struct kunit *test)

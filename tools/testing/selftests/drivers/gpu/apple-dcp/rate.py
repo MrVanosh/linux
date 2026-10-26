@@ -650,6 +650,8 @@ static bool dcp_firmware_metadata_current(struct apple_dcp *d,u64 generation) { 
 static const struct drm_edid *dcp_panel_edid_snapshot(struct apple_dcp *d,const struct dcp_display_mode *m,unsigned n,u64 *generation) { (void)d;(void)m;(void)n;(void)generation;assert(!"panel identity in external fixture");return ERR_PTR(-ENODATA); }
 static bool dcp_panel_metadata_current(struct apple_dcp *d,u64 generation) { (void)d;(void)generation;assert(!"panel identity in external fixture");return false; }
 static void dcp_panel_metadata_replace(struct apple_dcp *d,const struct dcp_display_metadata *m) { (void)d;(void)m;assert(!"panel identity in external receipt"); }
+static void dcp_panel_edid_receive(struct apple_dcp *d,const void *p,size_t n) { (void)d;(void)p;(void)n;assert(!"panel EDID in external receipt"); }
+#define dcp_trace_panel_property(...) ((void)0)
 
 static struct drm_display_mode *drm_mode_duplicate(struct drm_device *dev,const struct drm_display_mode *m) {
     assert(dev->mode_config.mutex);struct drm_display_mode *copy=malloc(sizeof(*copy));assert(copy);*copy=*m;

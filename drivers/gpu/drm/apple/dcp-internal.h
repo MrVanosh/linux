@@ -897,7 +897,6 @@ static inline bool dcp_ext_dptx_607(const struct apple_dcp *dcp)
 
 #define DCP_AUDIO_MAX_CHANS 15
 
-
 void dcp_trace_panel_property(struct apple_dcp *dcp, int tag, const char *key,
 			      size_t key_len, const void *blob, size_t len);
 

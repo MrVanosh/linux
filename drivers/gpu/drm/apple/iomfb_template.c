@@ -1265,7 +1265,8 @@ static bool dcpep_process_chunks(struct apple_dcp *dcp,
 					      dcp->chunks.length);
 
 	dcp_trace_panel_property(dcp, 0, req->key,
-		strnlen(req->key, sizeof(req->key)), dcp->chunks.data, dcp->chunks.length);
+				 strnlen(req->key, sizeof(req->key)),
+				 dcp->chunks.data, dcp->chunks.length);
 
 	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP)
 		dcp_panel_edid_receive(dcp, dcp->chunks.data, dcp->chunks.length);
