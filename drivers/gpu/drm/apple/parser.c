@@ -558,12 +558,14 @@ static int parse_color_modes(struct dcp_parse_ctx *handle,
 			     struct dcp_color_mode *unsafe_rgb8)
 {
 	struct iterator outer_it;
+	struct dcp_color_mode bootstrap = { .score = -1 };
 	unsigned int best_sdr_rank = 0, best_unsafe_rank = 0;
 	int ret = 0;
 	out->sdr_444.score = -1;
 	out->sdr_rgb.score = -1;
 	out->sdr.score = -1;
 	out->best.score = -1;
+	out->has_bootstrap = false;
 
 	ret = iterator_begin(handle, &outer_it, false);
 	if (ret)
@@ -627,7 +629,16 @@ static int parse_color_modes(struct dcp_parse_ctx *handle,
 				return ret;
 		}
 
-		/* Skip virtual or partial entries */
+		/*
+		 * Skip virtual or partial entries.  Remember the best virtual
+		 * one: the desktop 26.x firmware bootstraps its generic pipe
+		 * through it.
+		 */
+		if (is_virtual && cmode.score >= 0 && cmode.id >= 0 &&
+		    !fill_color_mode(&bootstrap, &cmode) && bootstrap.score >= 0) {
+			out->has_bootstrap = true;
+			out->bootstrap_color_id = bootstrap.id;
+		}
 		if (is_virtual || cmode.score < 0 || cmode.id < 0 ||
 		    cmode.id > U32_MAX)
 			continue;
@@ -1776,14 +1787,19 @@ static int parse_mode_in_avep_element(struct dcp_parse_ctx *handle,
 					return ret;
 			}
 		} else if (consume_string(it.handle, "ElementData")) {
+			size_t size = DCP_SOUND_COOKIE_SIZE;
 			const u8 *blob;
 
-			ret = parse_blob(it.handle, sizeof(*cookie), &blob);
+#if IS_ENABLED(CONFIG_DRM_APPLE_DCP_T6030_AUDIO)
+			if (dcp_parse_v14_7_audio(handle))
+				size = DCP_SOUND_COOKIE_SIZE_V14_7;
+#endif
+			ret = parse_blob(it.handle, size, &blob);
 			if (ret)
 				return ret;
 
 			if (cookie)
-				memcpy(cookie, blob, sizeof(*cookie));
+				memcpy(cookie, blob, size);
 		} else {
 			ret = skip_pair(it.handle);
 			if (ret)

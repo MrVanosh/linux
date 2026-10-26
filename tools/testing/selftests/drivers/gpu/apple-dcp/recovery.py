@@ -258,6 +258,18 @@ def check(root, output):
     static bool apple_rtkit_is_running(void *r) { (void)r;assert(!"T6030 dcpext diagnostic on H17P");return false; }
     static bool apple_rtkit_is_crashed(void *r) { (void)r;assert(!"T6030 dcpext diagnostic on H17P");return false; }
     '''+sender
+    if 'afk_send_compact_command(' in sender:
+        # Compact EPIC is the desktop 26.6 (T6041) wire; this H17P endpoint
+        # never switches to it, so the classic sender runs.
+        unit=unit.replace('struct apple_epic_service services[AFK_MAX_CHANNEL]; };',
+                          'struct apple_epic_service services[AFK_MAX_CHANNEL];bool compact; };',1)
+        sender='''#ifndef DCP_FIRMWARE_V_26_6_DESKTOP
+    #define DCP_FIRMWARE_V_26_6_DESKTOP (DCP_FIRMWARE_H17P + 3)
+    #endif
+    static u32 afk_compact_next_status(struct apple_epic_service *s) { (void)s;assert(!"compact EPIC on H17P");return 0; }
+    static int afk_send_compact_command(struct apple_epic_service *s,u8 type,const void *payload,size_t payload_len,void *output,size_t output_len,u32 request_status,u32 *retcode,size_t *copied,unsigned long timeout)
+    { (void)s;(void)type;(void)payload;(void)payload_len;(void)output;(void)output_len;(void)request_status;(void)retcode;(void)copied;(void)timeout;assert(!"compact EPIC on H17P");return -EIO; }
+    '''+sender
     unit+=sender+'\n'+tests
 
     out.mkdir(parents=True,exist_ok=True)
@@ -343,6 +355,19 @@ def check(root, output):
     }
     '''
     af=(root/'drivers/gpu/drm/apple/afk.c').read_text()
+    if 'static bool afk_compact_capable(' in af:
+        # The desktop 26.x ring messages and compact state; the actual
+        # capability check keeps this H17P endpoint on the classic path.
+        import re
+        queued=queued.replace('bool compact; };','bool compact;void *tx_wq,*compact_rx_data; };',1)
+        for message in ('RBEP_SPACE_AVAILABLE','RBEP_WAIT_FOR_SPACE'):
+            queued+='#define %s %s\n'%(message,re.search(r'\b'+message+r'\s*=\s*(\w+)',af).group(1))
+        queued+=r'''
+    #define FIELD_PREP(mask,val) ((val)&(mask))
+    #define dma_wmb() ((void)0)
+    static void afk_send(struct apple_dcp_afkep *e,u64 m) { (void)e;(void)m;assert(!"compact ring message on H17P"); }
+    static void afk_cancel_commands(struct apple_dcp_afkep *e) { assert(e && !e->compact); }
+    '''+extract(af,'static bool afk_compact_capable(')+'\n'
     for signature in ['static inline unsigned int afk_ring_drain_budget(', 'static inline unsigned int afk_ring_drain(']:
         queued+=extract(afh,signature)+'\n'
     for signature in ['static bool afk_recv_entry(', 'static void afk_recv_drain(',
@@ -408,6 +433,13 @@ def check(root, output):
     static const struct drm_edid *dcpavserv_read_edid_legacy(struct apple_epic_service *service) { return dcpavserv_read_edid_inline(service); }    /* The 14.7 open-before-EDID handshake is for T6030 external processors only. */
     static int __attribute__((unused)) afk_service_call(struct apple_epic_service *s,u16 group,u32 command,const void *data,size_t data_len,size_t data_pad,void *output,size_t output_len,size_t output_pad)
 { (void)s;(void)group;(void)command;(void)data;(void)data_len;(void)data_pad;(void)output;(void)output_len;(void)output_pad;assert(!"14.7 open-before-EDID on H17P");return -ENODEV; }
+    /* Only the 14.7 external role opens the AV client and validates every EDID block. */
+    #ifndef ECANCELED
+    #define ECANCELED 125
+    #endif
+    static int __attribute__((unused)) dcpavserv_v14_open(struct apple_dcp *d,struct apple_epic_service *s,u64 epoch,u64 gen)
+    { (void)d;(void)s;(void)epoch;(void)gen;assert(!"14.7 AV client open on H17P");return -ENODEV; }
+    static bool __attribute__((unused)) drm_edid_valid(const struct drm_edid *e) { (void)e;assert(!"14.7 EDID validation on H17P");return false; }
     '''
     dpav=(root/'drivers/gpu/drm/apple/epic/dpavservep.c').read_text()
     for signature in ['bool dcpavserv_edid_current(', 'bool dcpavserv_edid_service_current(', 'const struct drm_edid *dcpavserv_copy_edid(']:

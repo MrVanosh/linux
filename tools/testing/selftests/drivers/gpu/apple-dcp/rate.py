@@ -3,7 +3,7 @@
 """Actual parser, bounded rate admission, catalog replacement and HPD."""
 from pathlib import Path
 import copy, re, struct
-from common import block, source_defines, apple_function, internal_inline
+from common import block, source_defines, apple_function, internal_inline, firmware_lineage
 
 def parser_fixture(root):
 
@@ -48,6 +48,8 @@ def parser_fixture(root):
     metadata = block(metadata, 'struct dcp_display_metadata {') + ';\n'
     header = (base / 'parser.h').read_text()
     header = header[header.index('struct apple_dcp;'):header.index('int parse(')]
+    # Header helpers stay header-like: unused here, as in any includer.
+    header = header.replace('static inline ', 'static inline __attribute__((unused)) ')
     edid_header = (root / 'include/drm/drm_edid.h').read_text()
     edid_header = edid_header[edid_header.index('#define EDID_LENGTH'):edid_header.index('/* EDID matching */')]
     builder = (base / 'dcp-display-metadata.c').read_text()
@@ -559,13 +561,13 @@ struct apple_connector {''')
     state = state.replace('struct apple_epic_service { struct apple_epic *ep; void *cookie; bool enabled; };', '''struct apple_epic_service { struct apple_epic *ep; void *cookie; bool enabled,torndown;
     unsigned users,channel; struct { u64 generation,epoch; } admission;
 };''')
-    state = state.replace('struct { bool lock, enabled; void *service; u64 epoch; } dcpavserv;', 'struct { bool lock, enabled; void *service, *opened; u64 epoch; int enable_completion; } dcpavserv;')
+    state = state.replace('struct { bool lock, enabled; void *service; u64 epoch; } dcpavserv;', 'struct { bool lock, enabled; void *service, *opened; u64 epoch,opened_epoch; int enable_completion; struct work_struct close_wq; } dcpavserv;')
     # Catalogue/EDID ownership: modes are admitted per attachment under modes_lock.
     state = state.replace('    struct work_struct hotplug_wq, bl_sync_wq;\n};', '    struct work_struct hotplug_wq, bl_sync_wq;\n    bool edid_live; unsigned hotplug_reasons;\n};', 1)
     state = state.replace('u64 typec_generation; unsigned int nr_modes;', '''u64 typec_generation; unsigned int nr_modes;
     struct apple_epic *dcpavservep;
     int fw_compat,width_mm,height_mm,fixed_connector_type; unsigned notch_height;
-    bool modes_lock,modes_admitted,modes_provisional,placeholder_retried; int external_held;
+    bool modes_lock,modes_admitted,modes_provisional,placeholder_retried,external_native; int external_held;
     u64 modes_generation,dimensions_generation; struct work_struct dimensions_wq;
     struct { int width_mm,height_mm; } panel;
     struct { size_t length,received; void *data; bool contiguous,payload_complete; u64 modes_generation;
@@ -610,6 +612,10 @@ static void reinit_completion(int *p) { *p=0; }
 static struct apple_epic_service *afk_service_get(struct apple_epic_service *s) { if(!s->enabled) return NULL; s->users++; return s; }
 static void afk_service_put(struct apple_epic_service *s) { assert(s->users); s->users--; }
 static void afk_service_retire(struct apple_epic_service *s) { assert(!*hpd_lock); s->enabled=false; s->torndown=true; }
+/* These H17P scenarios never queue the native 14.7 Close worker. */
+static bool cancel_work_sync(struct work_struct *w) { assert(!w->scheduled); return false; }
+/* Native audio is out of scope: reject entry instead of silently queueing it. */
+static void dcp_external_audio_start(struct apple_dcp *d) { assert(!d->external_native); }
 static void dpavservep_detach(struct apple_dcp *d);
 static struct apple_dcp *probing;
 static struct drm_edid transport_edid;
@@ -671,7 +677,9 @@ static void disable_work_sync(struct work_struct *w) { (void)w; }
 #define DCP_FIRMWARE_V_14_7 (DCP_FIRMWARE_H17P + 1)
 #define DCP_FIRMWARE_V_14_7_TEMPLATE (DCP_FIRMWARE_H17P + 2)
 #endif
-'''+internal_inline(root,'dcp_fw_is_14_7')+r'''/* Off T6030 machines the direct crossbar output is not clocked separately. */
+/* Nor the desktop 26.6 firmware, the one that withholds VRR modes. */
+#define DCP_FIRMWARE_V_26_6_DESKTOP (DCP_FIRMWARE_H17P + 3)
+'''+firmware_lineage(root)+internal_inline(root,'dcp_fw_is_14_7')+r'''/* Off T6030 machines the direct crossbar output is not clocked separately. */
 static int __attribute__((unused)) dcp_direct_crossbar_link(struct apple_dcp *d,bool up) { (void)d;(void)up;return 0; }
 '''
     transport = '\n'.join(block(av,marker) for marker in [
@@ -692,7 +700,7 @@ static int __attribute__((unused)) dcp_direct_crossbar_link(struct apple_dcp *d,
                     + ''.join(apple_function(root, name) for name in ('dcp_queue_hotplug', 'dcp_modes_for_connector',
                               'apple_connector_invalidate_edid', 'apple_connector_edid_set_live'))
                     + mode_helpers)
-    publication = block(iomfb,'static void dcp_clear_connector_edid(')+'\n'+block(iomfb,'static void dcp_consume_edid_invalidation(')+mode_helpers+block(iomfb,'int dcp_get_modes(')+block(iomfb,re.search(r'^[^\n;]*\blookup_mode\(',iomfb,re.M).start())
+    publication = block(iomfb,'static void dcp_clear_connector_edid(')+'\n'+block(iomfb,'static void dcp_consume_edid_invalidation(')+mode_helpers+block(iomfb,'static bool dcp_mode_vrr_supported(')+'\n'+block(iomfb,'int dcp_get_modes(')+block(iomfb,re.search(r'^[^\n;(]*\blookup_mode\(',iomfb,re.M).start())
     # Drive malformed replacements through the same chunk/end ingress as firmware.
     # The dictionary cache is a boundary substitute and takes ownership of the blob.
     receipt = r'''

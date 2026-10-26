@@ -71,6 +71,7 @@ bool dcp_typec_port_unusable(unsigned int idx);
 void dcp_typec_port_set_connector(unsigned int idx, bool secondary,
 				  struct apple_connector *connector);
 bool dcp_typec_dual_stream(void);
+bool dcp_typec_ordered_dual_stream(void);
 void dcp_typec_reorder(void);
 bool dcp_typec_follows_crtc(struct apple_dcp *dcp);
 bool dcp_typec_follow_holder_off(struct drm_atomic_commit *state, struct drm_crtc *crtc,
@@ -90,6 +91,7 @@ void dcp_unlink(struct drm_device *drm);
 int dcp_tunnel_crossbar_up(struct apple_dcp *dcp, u32 unit);
 int dcp_tunnel_crossbar_down(struct apple_dcp *dcp, u32 unit);
 int dcp_direct_crossbar_link(struct apple_dcp *dcp, bool up);
+int dcp_dpxbar_link(struct mux_control *mux, bool up);
 /*
  * T6030 ATC PHY: keep the source owning the pixel clock across rate changes
  * and stop (linux/soc/apple/dp-tunnel.h, 170-usb). Declared here until that

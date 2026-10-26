@@ -21,7 +21,25 @@ struct dcp_parse_ctx {
 	/* External H17P candidates require separate publication/lookup proof. */
 	bool automatic_1080p180_rgb8;
 	bool ambiguous_180hz;
+#if IS_ENABLED(CONFIG_DRM_APPLE_DCP_T6030_AUDIO)
+	/*
+	 * T6030 external processor audio elements (DCP firmware 14.7, external
+	 * role): an element's ElementData, the link data the audio service
+	 * takes, is 32 bytes.
+	 */
+	bool v14_7_audio;
+#endif
 };
+
+/* The T6030 external processor's audio elements (DRM_APPLE_DCP_T6030_AUDIO only). */
+static inline bool dcp_parse_v14_7_audio(const struct dcp_parse_ctx *ctx)
+{
+#if IS_ENABLED(CONFIG_DRM_APPLE_DCP_T6030_AUDIO)
+	return ctx->v14_7_audio;
+#else
+	return false;
+#endif
+}
 
 enum dcp_color_eotf {
 	DCP_EOTF_SDR_GAMMA = 0, // "SDR gamma"
@@ -106,9 +124,16 @@ struct dcp_display_mode {
 	bool preferred;
 	bool metadata_timing_valid;
 	bool automatic_rgb8_quirk;
+	/*
+	 * The best virtual color element of the timing, which the desktop
+	 * 26.x firmware selects first to bootstrap its generic pipe (valid if
+	 * has_bootstrap).  Both sit in what was padding.
+	 */
+	u32 bootstrap_color_id;
 	u64 automatic_connection_sequence;
 	u64 automatic_catalog_sequence;
 	bool automatic_service_pending;
+	bool has_bootstrap;
 	/* Immutable receipt provenance; never retag a cached exception. */
 	struct dcp_metadata_ticket unsafe_rgb8_ticket;
 	u64 unsafe_rgb8_service_epoch;
@@ -178,8 +203,20 @@ struct dcp_sound_format_mask {
 	unsigned int nchans;
 };
 
+/*
+ * An audio element's ElementData, the link data of the audio service's link
+ * methods: 24 bytes up to DCP firmware 13.5, 32 on the 14.7 external role.
+ */
+#define DCP_SOUND_COOKIE_SIZE		24
+#if IS_ENABLED(CONFIG_DRM_APPLE_DCP_T6030_AUDIO)
+#define DCP_SOUND_COOKIE_SIZE_V14_7	32
+#define DCP_SOUND_COOKIE_MAX		DCP_SOUND_COOKIE_SIZE_V14_7
+#else
+#define DCP_SOUND_COOKIE_MAX		DCP_SOUND_COOKIE_SIZE
+#endif
+
 struct dcp_sound_cookie {
-	u8 data[24];
+	u8 data[DCP_SOUND_COOKIE_MAX];
 };
 
 struct snd_pcm_chmap_elem;
