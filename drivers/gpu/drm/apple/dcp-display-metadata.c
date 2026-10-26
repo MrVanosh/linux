@@ -293,12 +293,19 @@ const struct drm_edid *dcp_panel_edid(const struct dcp_display_metadata *metadat
 	block.product_id.manufacturer_name = cpu_to_be16(manufacturer);
 	block.product_id.product_code = cpu_to_le16(metadata->product);
 	block.product_id.serial_number = cpu_to_le32(metadata->serial);
+	/* J616 is a 2024 model; this is not a panel manufacture date. */
+	block.product_id.week_of_manufacture = 0xff;
+	block.product_id.year_of_manufacture = 2024 - 1990;
 	block.version = 1;
 	block.revision = 4;
 	block.input = DRM_EDID_INPUT_DIGITAL;
 	block.width_cm = dimensions.width_cm;
 	block.height_cm = dimensions.height_cm;
 	block.gamma = 0xff;
+	/* Nominal D65 reference white, without calibrated primaries or gamma. */
+	block.white_x = 320 >> 2;
+	block.white_y = 337 >> 2;
+	block.blue_white_lo = (320 & 3) << 2 | (337 & 3);
 	block.features = DRM_EDID_FEATURE_PREFERRED_TIMING;
 	memset(block.standard_timings, 1, sizeof(block.standard_timings));
 	snprintf(name, sizeof(name), "%.3s %04x", metadata->manufacturer, metadata->product);

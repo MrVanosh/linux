@@ -118,7 +118,9 @@ serial zero, represented by the non-empty serial descriptor ``00000000``.
 This generic identity does not claim to identify an individual panel. The
 preferred representable timing and range limits come from the retained DCP
 TimingElements catalog. Exact mode enumeration continues to use that catalog.
-No new mode, color capability or machine serial is invented. The ADT reader,
+The EDID records model year 2024 (not a manufacture date) and a nominal D65
+reference white point required by EDID parsing. No calibrated primaries, gamma,
+new mode or machine serial is claimed. The ADT reader,
 EDID fallback and real EDID setters are restricted to desktop 26.6; T8140
 continues to use its existing path.
 
