@@ -142,14 +142,9 @@ static inline u64 dcpep_ack(enum dcp_context_id id)
 	return dcpep_msg(id, 0, 0) | IOMFB_MSG_ACK;
 }
 
-/* Keep the established fixed-refresh default until panel qualification. */
-static bool t6041_vrr;
-module_param(t6041_vrr, bool, 0444);
-MODULE_PARM_DESC(t6041_vrr, "Enable experimental adaptive sync on the T6041 internal panel");
-
 bool dcp_desktop_vrr_supported(struct apple_dcp *dcp)
 {
-	return t6041_vrr && dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP &&
+	return dcp->panel.has_vrr && dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP &&
 		dcp_has_panel(dcp) && dcp->main_display &&
 		!READ_ONCE(dcp->desktop->vrr_failed);
 }

@@ -186,6 +186,8 @@ struct dcp_panel {
 	int height_mm;
 	/// panel has a mini-LED backlight
 	bool has_mini_led;
+	/* The DT panel compatible identifies an adaptive-sync capable panel. */
+	bool has_vrr;
 };
 
 enum dcp_iomfb_method_profile {

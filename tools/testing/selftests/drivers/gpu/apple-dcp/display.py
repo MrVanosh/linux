@@ -226,14 +226,13 @@ typedef uint64_t u64;
 struct dcp_wait_cookie { u32 status; bool done,replied; };
 struct dcp_set_digital_out_mode_req {u32 color_mode_id,timing_mode_id;};
 struct dcp_set_parameter_dcp { u32 param; u64 value[4]; u32 count; };
-struct apple_dcp {void *dev;int fw_compat;bool main_display,panel;struct {bool vrr_failed,modeset_callback_error;} *desktop;};
-static bool t6041_vrr;
+struct apple_dcp {void *dev;int fw_compat;bool main_display,has_panel;struct {bool has_vrr;} panel;struct {bool vrr_failed,modeset_callback_error;} *desktop;};
 struct drm_display_mode {int id;};
 struct drm_crtc_state {bool vrr_enabled;struct drm_display_mode mode;};
 struct dcp_display_mode {bool vrr;};
 static bool lookup_mode(struct apple_dcp *d,struct drm_display_mode *m,struct dcp_display_mode *out)
 {out->vrr=m->id==120;return m->id==60 || m->id==120;}
-static bool dcp_has_panel(struct apple_dcp *d) {return d->panel;}
+static bool dcp_has_panel(struct apple_dcp *d) {return d->has_panel;}
 static u32 get_unaligned_le32(const void *p) {u32 v;memcpy(&v,p,4);return v;}
 typedef void (*callback)(struct apple_dcp *,void *,void *);
 static callback pending;
@@ -262,18 +261,18 @@ static void selected(struct apple_dcp *d,struct dcp_modeset_cookie *m)
 {u32 zero=0;reply(d,2,&zero);assert(requested.color_mode_id==11);reply(d,3,&zero);assert(m->wait.done && m->wait.replied && !m->wait.status);}
 int main(void)
 {
-    struct apple_dcp d={.fw_compat=DCP_FIRMWARE_V_26_6_DESKTOP,.main_display=true,.panel=true};
+    struct apple_dcp d={.fw_compat=DCP_FIRMWARE_V_26_6_DESKTOP,.main_display=true,.has_panel=true};
     __typeof__(*d.desktop) desktop={0};d.desktop=&desktop;
     struct drm_crtc_state state={.vrr_enabled=true,.mode={120}};
     assert(dcp_desktop_vrr_check(&d,&state)==-EINVAL);
-    assert(!dcp_desktop_vrr_supported(&d));t6041_vrr=true;
+    assert(!dcp_desktop_vrr_supported(&d));d.panel.has_vrr=true;
     assert(!dcp_desktop_vrr_check(&d,&state));
     state.mode.id=60;assert(dcp_desktop_vrr_check(&d,&state)==-EINVAL);
     state.vrr_enabled=false;assert(!dcp_desktop_vrr_check(&d,&state));
     state.vrr_enabled=true;state.mode.id=120;
     assert(dcp_desktop_vrr_supported(&d));
     d.main_display=false;assert(!dcp_desktop_vrr_supported(&d));d.main_display=true;
-    d.panel=false;assert(!dcp_desktop_vrr_supported(&d));d.panel=true;
+    d.has_panel=false;assert(!dcp_desktop_vrr_supported(&d));d.has_panel=true;
     d.fw_compat=3;assert(!dcp_desktop_vrr_supported(&d));d.fw_compat=DCP_FIRMWARE_V_26_6_DESKTOP;
     struct dcp_modeset_cookie m;u32 zero=0,error=1;
     initialize(&m);dcp_modeset_sync(&d,&m);

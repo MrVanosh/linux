@@ -26,9 +26,10 @@ does not synthesize lower refresh modes from a 120 Hz mode. Fractional rates
 remain in 16.16 Hz until the DRM pixel clock is calculated. A ProMotion mode
 needs desktop presentation deadlines even with adaptive sync disabled.
 
-Adaptive sync is experimental and disabled by default. To qualify the internal
-panel, boot with ``appledrm.t6041_vrr=1``. This enables the connector capability
-only for the internal main display and a valid adaptive-sync range. The
+The DT panel compatible ``apple,panel-j616`` identifies the ProMotion panel and
+enables adaptive sync support without a module parameter. The connector capability
+requires the desktop firmware profile, the internal main display, and a valid
+adaptive-sync range. Other panel compatibles do not acquire this capability. The
 existing internal ProMotion convention supplies 24 Hz to the mode rate when
 the firmware omits both range fields or reports both as zero placeholders;
 a partial, duplicate or invalid range

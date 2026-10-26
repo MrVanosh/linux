@@ -4937,6 +4937,8 @@ static int dcp_comp_bind_pipe(struct device *dev, struct device *main, void *dat
 				dev_err(dev, "Missing property 'apple,max-brightness'\n");
 		}
 
+		/* J616 ProMotion capability belongs to the panel, not a boot option. */
+		dcp->panel.has_vrr = of_device_is_compatible(panel_np, "apple,panel-j616");
 		of_property_read_u32(panel_np, "width-mm", &dcp->panel.width_mm);
 		/* use adjusted height as long as the notch is hidden */
 		of_property_read_u32(panel_np, height_prop[!dcp->notch_height],
