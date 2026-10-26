@@ -508,6 +508,8 @@ static const struct apple_clpc_hw apple_clpc_hw_t8140 = {
  * A cluster requests only after three busy samples in a row (12 ms). At idle
  * a single busy sample raised the floor about 60 % of the time, from short
  * bursts of background work; three in a row bring that to about 11 %.
+ * GPU demand bypasses the CPU streak and uses the same qualified DCS 5 /
+ * fabric 2 states until the graphics state powers off and HOLD_MS expires.
  */
 static const struct apple_clpc_hw apple_clpc_hw_t6040 = {
 	.rail = { [APPLE_CLPC_DCS] = 0, [APPLE_CLPC_SOC] = 1 },
@@ -516,6 +518,7 @@ static const struct apple_clpc_hw apple_clpc_hw_t6040 = {
 		[APPLE_CLPC_SOC] = { 0, 1, 2, 2 },
 	},
 	.sustain = 3,
+	.gpu_demand = true,
 };
 
 static const struct of_device_id apple_clpc_of_match[] = {
