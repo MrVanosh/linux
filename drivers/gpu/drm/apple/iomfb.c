@@ -91,17 +91,6 @@ static inline u64 dcpep_ack(enum dcp_context_id id)
 }
 
 /*
- * The desktop 26.6 modeset programs adaptive sync only for the internal
- * ProMotion panel (see iomfb_modeset()); offer VRR there and nowhere else.
- */
-static bool dcp_mode_vrr_supported(struct apple_dcp *dcp,
-				   const struct dcp_display_mode *mode)
-{
-	return dcp->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP || !mode->vrr ||
-	       dcp->main_display;
-}
-
-/*
  * A channel is busy if we have sent a message that has yet to be
  * acked. The driver must not sent a message to a busy channel.
  */
@@ -1963,8 +1952,6 @@ edid_done:
 			continue;
 		published_180hz |= modes[i].automatic_rgb8_quirk;
 		published++;
-		if (!dcp_mode_vrr_supported(dcp, &modes[i]))
-			continue;
 		if (modes[i].vrr) {
 			u16 lo = modes[i].min_vrr >> 16;
 			u16 hi = modes[i].max_vrr >> 16;
