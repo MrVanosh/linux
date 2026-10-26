@@ -426,7 +426,12 @@ int main(int argc, char **argv)
     u64 generation=99;
     desktop.panel_adt_identity=(struct dcp_display_metadata){.manufacturer="APP",.product=0x616};
     const struct drm_edid *fallback=dcp_panel_edid_snapshot(&d,modes,3,&generation);
-    assert(!IS_ERR(fallback) && drm_edid_valid(fallback));drm_edid_free(fallback);
+    assert(!IS_ERR(fallback) && drm_edid_valid(fallback));
+    if(argc==2) {
+        char path[4096];snprintf(path,sizeof(path),"%s.adt-fallback",argv[1]);
+        FILE *file=fopen(path,"wb");assert(file);assert(fwrite(&fallback->raw,128,1,file)==1);fclose(file);
+    }
+    drm_edid_free(fallback);
     bool (*handlers[600])(struct apple_dcp *,int,void *,void *)={
 ''' + bindings + r'''
     };

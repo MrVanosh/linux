@@ -857,8 +857,10 @@ void dcp_panel_metadata_replace(struct apple_dcp *dcp,
 	    memcmp(&dcp->desktop->panel_metadata, &merged, sizeof(merged))) {
 		dcp->desktop->panel_metadata = merged;
 		dcp->desktop->panel_metadata_valid = true;
-		dcp->desktop->panel_metadata_generation++;
-		changed = true;
+		if (!dcp->desktop->panel_raw_edid_size) {
+			dcp->desktop->panel_metadata_generation++;
+			changed = true;
+		}
 	}
 	spin_unlock_irqrestore(&dcp->metadata.lock, flags);
 	if (changed && dcp->connector)
