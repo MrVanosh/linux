@@ -64,16 +64,17 @@ def check_guards():
     ordered(detach, '.park();', 'parked.release_consumed(context.scheduler_va());')
     runtime = (ROOT / 'runtime.rs').read_text()
     # A compute queue does not change owner while its scheduler is released.
-    ordered(item(runtime, 'pub(super) fn rebind_compute('), '.filter(|queue| queue.reusable())',
+    ordered(item(runtime, 'fn bind_reusable('), '.filter(|queue| queue.reusable())',
             'teardown.releasing(bound)', 'continue;', 'queue.bind_owner(owner, context.clone())?;')
     ordered(item(runtime, 'pub(super) fn bind_rearmed('), 'teardown.releasing(bound)', 'return Err(EAGAIN);',
             'queue.bind_owner(')
-    ordered(item(runtime, 'fn publish_compute('), '.pending_switch_from()', 'queues.teardown.releasing(previous)',
+    ordered(item(runtime, 'fn publish_compute_raw('), '.pending_switch_from()', 'queues.teardown.releasing(previous)',
             'return Err(EAGAIN);', 'queue.publish(')
     # A busy pair (for example one whose scheduler release is still being consumed)
     # kicks the event worker, which observes the release and parks the pair.
-    ordered(item(submit, 'fn wait_render_busy('), 'WORK_RING_WAIT_NS', 'return Err(ETIMEDOUT);',
-            'self.shared.queue_events();', 'fsleep(')
+    ordered(item(submit, 'fn wait_render_busy('), 'WORK_RING_WAIT_NS',
+            'self.shared.queue_events();', 'self.wait_domain(')
+    ordered(item(submit, 'fn wait_domain('), 'if remaining == 0', 'return Err(ETIMEDOUT);', 'domain.block(')
     for name, path in [('take_pair', 'runtime/render.rs'), ('take_render_observation', 'runtime/render/observe.rs')]:
         body = item((ROOT / path).read_text(), f'fn {name}(')
         ordered(body, 'entry.borrowed_switch = pair.switch_in_flight();', 'entry.pair.take()')
