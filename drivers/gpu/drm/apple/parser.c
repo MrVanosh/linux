@@ -2061,3 +2061,37 @@ int parse_identity_keys(const void *blob, size_t len, dcp_identity_key_fn emit, 
 
 	return ret ?: parse_identity_tree(&ctx, emit, data, 0, &budget);
 }
+
+/* A setter may deliver the EDID bytes directly or as an OSSerialize blob. */
+int parse_panel_edid_data(const void *blob, size_t len, const u8 **edid, size_t *size)
+{
+	struct dcp_parse_ctx ctx;
+	const struct dcp_parse_tag *tag;
+	const u8 *data = blob;
+	u32 bytes;
+	int ret;
+
+	if (len >= 128 && !memcmp(data, "\x00\xff\xff\xff\xff\xff\xff\x00", 8)) {
+		bytes = (1U + data[126]) * 128;
+		if (bytes > len || bytes > 4096)
+			return -EINVAL;
+		*edid = data;
+		*size = bytes;
+		return 0;
+	}
+	ret = parse(blob, len, &ctx);
+	if (ret)
+		return ret;
+	tag = parse_tag_of_type(&ctx, DCP_TYPE_BLOB);
+	if (IS_ERR(tag) || tag->size < 128 || tag->size > 4096 || tag->size % 128)
+		return -EINVAL;
+	data = parse_bytes(&ctx, tag->size);
+	if (IS_ERR(data))
+		return PTR_ERR(data);
+	if (memcmp(data, "\x00\xff\xff\xff\xff\xff\xff\x00", 8) ||
+	    (1U + data[126]) * 128 != tag->size)
+		return -EINVAL;
+	*edid = data;
+	*size = tag->size;
+	return 0;
+}

@@ -110,6 +110,11 @@ static bool trampoline_panel_dictionary_v26_6(struct apple_dcp *dcp, int tag,
 	if (!dcp_has_panel(dcp) || req->value_null ||
 	    !memchr(key, 0, sizeof(req->key)))
 		goto done;
+	/* A real EDID blob, when supplied, takes precedence over product data. */
+	if (!strcmp(key, "EDID") || !strcmp(key, "edid")) {
+		dcp_panel_edid_receive(dcp, req->value, sizeof(req->value));
+		goto done;
+	}
 	if (strcmp(key, "DisplayAttributes") && strcmp(key, "ProductAttributes"))
 		goto done;
 	ret = parse(req->value, sizeof(req->value), &ctx);

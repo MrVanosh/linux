@@ -48,6 +48,9 @@ typedef u64 dma_addr_t;
 #undef static_assert
 #define static_assert(c) _Static_assert(c,#c)
 #define trace_iomfb_callback(...) ((void)0)
+#define dcp_trace_panel_property(...) ((void)0)
+#define GFP_KERNEL 0
+#define kmalloc(n,f) malloc(n)
 #define dev_warn_dma(...) ((void)0)
 struct dcp_map_physical_req {u64 paddr,size;u32 flags;u8 dva_null,dva_size_null,padding[2];} __attribute__((packed));
 struct dcp_map_physical_resp {u64 dva,dva_size;u32 mem_desc_id;} __attribute__((packed));
@@ -374,10 +377,11 @@ def panel_identity(root, output=None):
             f['edid_header'] + f['parser'] + f['stubs'] + f['builder'])
     source = (root / 'drivers/gpu/drm/apple/dcp.c').read_text()
     helpers = '\n'.join(block(source, name) for name in (
-        'void dcp_panel_metadata_replace(', 'bool dcp_panel_metadata_current(',
+        'void dcp_panel_metadata_replace(', 'void dcp_panel_edid_receive(', 'bool dcp_panel_metadata_current(',
         'const struct drm_edid *dcp_panel_edid_snapshot('))
     backend = (root / 'drivers/gpu/drm/apple/iomfb_v26_6_desktop.c').read_text()
-    dictionary = block(backend, 'struct dcp_dict_passthrough_req_v26_6 {')+';\n'
+    dictionary = block((root/'drivers/gpu/drm/apple/parser.c').read_text(), 'int parse_panel_edid_data(')
+    dictionary += block(backend, 'struct dcp_dict_passthrough_req_v26_6 {')+';\n'
     dictionary += block(backend, 'static bool trampoline_panel_dictionary_v26_6(')
     dictionary += block(backend, 'bool iomfb_check_callback_v26_6_desktop(')
     bindings = '\n'.join(line for line in block(backend, 'static const iomfb_cb_handler cb_handlers[').splitlines()
@@ -385,11 +389,14 @@ def panel_identity(root, output=None):
     unit = code + r'''
 #define DCP_FIRMWARE_V_26_6_DESKTOP 5
 #define trace_iomfb_callback(...) ((void)0)
+#define dcp_trace_panel_property(...) ((void)0)
+#define GFP_KERNEL 0
+#define kmalloc(n,f) malloc(n)
 #define spin_lock_irqsave(p,f) do {assert(!*(p));*(p)=true;(f)=0;} while(0)
 #define spin_unlock_irqrestore(p,f) do {assert(*(p));*(p)=false;(void)(f);} while(0)
 struct apple_dcp {
     int fw_compat;bool has_panel;struct {bool lock;} metadata;
-    struct {struct dcp_display_metadata panel_metadata;u64 panel_metadata_generation;bool panel_metadata_valid;} *desktop;
+    struct {struct dcp_display_metadata panel_metadata, panel_adt_identity;u64 panel_metadata_generation;bool panel_metadata_valid;u8 panel_raw_edid[4096];size_t panel_raw_edid_size;} *desktop;
     struct {u32 width_mm,height_mm;} panel;void *connector;
 };
 static unsigned notifications;
@@ -414,7 +421,9 @@ int main(int argc, char **argv)
         .flags=DRM_MODE_FLAG_PHSYNC|DRM_MODE_FLAG_PVSYNC,.type=i==0?DRM_MODE_TYPE_PREFERRED:0};
     modes[0].vrr=true;modes[0].min_vrr=24U<<16;modes[0].max_vrr=120U<<16;
     u64 generation=99;
-    assert(IS_ERR(dcp_panel_edid_snapshot(&d,modes,3,&generation)));
+    desktop.panel_adt_identity=(struct dcp_display_metadata){.manufacturer="APP",.product=0x616};
+    const struct drm_edid *fallback=dcp_panel_edid_snapshot(&d,modes,3,&generation);
+    assert(!IS_ERR(fallback) && drm_edid_valid(fallback));drm_edid_free(fallback);
     bool (*handlers[600])(struct apple_dcp *,int,void *,void *)={
 ''' + bindings + r'''
     };
@@ -466,6 +475,17 @@ int main(int argc, char **argv)
     assert(bytes[108+4] & DRM_EDID_RANGE_OFFSET_MAX_HFREQ);
     /* The encoded timing clock rounds to 10 kHz; the DCP catalog is unchanged. */
     assert(modes[1].mode.clock==540005 && modes[0].mode.clock==1080005);
+    /* A real EDID replaces the fallback; invalid replacement preserves it. */
+    u8 real[128];memcpy(real,bytes,128);real[12]^=1;real[127]^=1;
+    dcp_panel_edid_receive(&d,real,sizeof(real));
+    assert(desktop.panel_raw_edid_size==128);
+    generation=desktop.panel_metadata_generation;
+    const struct drm_edid *copied=dcp_panel_edid_snapshot(&d,modes,3,&generation);
+    assert(!IS_ERR(copied) && !memcmp(&copied->raw,real,128));drm_edid_free(copied);
+    unsigned previous=notifications;
+    real[127]^=1;dcp_panel_edid_receive(&d,real,sizeof(real));
+    assert(notifications==previous);
+    desktop.panel_raw_edid_size=0;notifications=1;
     drm_edid_free(edid);
     /* Repeated and partial dictionaries cannot trigger monitor/brightness restore loops. */
     for(unsigned repeat=0;repeat<32;repeat++) {
@@ -663,6 +683,62 @@ int main(void)
     }
     u32 huge[]={0xd3,(1U<<24)|0xffffff};
     assert(parse_identity_keys(huge,sizeof(huge),emit,NULL)==-E2BIG);
+    return 0;
+}
+'''
+
+
+def adt_identity(root):
+    import struct
+    def node(props, children=()):
+        out=bytearray(struct.pack('<II',len(props),len(children)))
+        for k,v in props.items():
+            if isinstance(v,int):v=struct.pack('<I',v)
+            out+=k.encode().ljust(32,b'\0')+struct.pack('<I',len(v))+v
+            out+=b'\0'*(-len(out)%4)
+        return bytes(out)+b''.join(children)
+    panel=node({'product-id':42,'vendor-id':0x5274,'width-mm':345,'height-mm':223,
+                'serial-number':b'SYNTHETIC-PANEL','name':b'panel\0'})
+    data=node({'name':b'device-tree\0'},[node({'name':b'product\0'},[panel]),
+              node({'name':b'chosen\0','serial-number':b'PRIVATE-MACHINE'})])
+    base=root/'drivers/gpu/drm/apple'
+    source=(base/'dcp-panel-adt.c').read_text()
+    source='\n'.join(l for l in source.splitlines() if not l.startswith('#include'))
+    header=(base/'dcp-panel-adt.h').read_text()
+    code=r'''
+#include <assert.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <string.h>
+#include <errno.h>
+typedef uint8_t u8;typedef uint32_t u32;
+#define U16_MAX UINT16_MAX
+#define SZ_16M (16U<<20)
+#define ALIGN(x,n) (((x)+(n)-1)&~((n)-1))
+#define ERR_PTR(x) ((void *)(intptr_t)(x))
+#define PTR_ERR(x) ((int)(intptr_t)(x))
+#define IS_ERR(x) ((uintptr_t)(x)>(uintptr_t)-4096)
+static u32 get_unaligned_le32(const void *p) {u32 n;memcpy(&n,p,4);return n;}
+'''
+    code+=block((base/'dcp-display-metadata.h').read_text(),'struct dcp_display_metadata {')+';\n'
+    code+=block(header,'struct dcp_panel_adt {')+';\n'+source
+    code+='static const u8 fixture[]={'+','.join(map(str,data))+'};\n'
+    return code+r'''
+int main(void)
+{
+    struct dcp_panel_adt panel={.identity={.manufacturer="APP",.product=0x616}};
+    assert(!dcp_panel_adt_parse(fixture,sizeof(fixture),&panel));
+    assert(panel.found && panel.width_mm==345 && panel.height_mm==223);
+    assert(!strcmp(panel.identity.manufacturer,"TST") && panel.identity.product==42);
+    assert(panel.identity.serial && panel.identity.serial==dcp_adt_serial((const u8 *)"SYNTHETIC-PANEL",15));
+    for(unsigned n=0;n<sizeof(fixture);n++) {
+        struct dcp_panel_adt old=panel;
+        assert(dcp_panel_adt_parse(fixture,n,&panel)<0);
+        assert(!memcmp(&old,&panel,sizeof(panel)));
+    }
+    u32 huge[]={5000,0};assert(dcp_panel_adt_parse(huge,sizeof(huge),&panel)==-E2BIG);
+    assert(dcp_panel_adt_parse(NULL,0,&panel)==-EINVAL);
     return 0;
 }
 '''

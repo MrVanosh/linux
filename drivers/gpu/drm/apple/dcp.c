@@ -51,6 +51,10 @@
 #include "afk.h"
 #include "av.h"
 #include "dcp.h"
+#include "dcp-panel-adt.h"
+#include <linux/io.h>
+#include <linux/of_address.h>
+#include <linux/sizes.h>
 #include "dcp-fabric-effects.h"
 #include "dcp-fabric.h"
 #include "dcp-hdmi.h"
@@ -776,6 +780,48 @@ const struct drm_edid *dcp_firmware_edid(struct apple_dcp *dcp, u64 *generation)
 	return edid;
 }
 
+/*
+ * m1n1 reserves the original ADT as a phram node labelled "adt". Read it
+ * without an MTD dependency. Only the desktop panel calls this; other DCP
+ * profiles retain their established identity and brightness paths.
+ */
+static void dcp_panel_adt_identity(struct apple_dcp *dcp)
+{
+	struct dcp_panel_adt panel = {
+		.identity = { .manufacturer = "APP", .product = 0x0616 },
+		.width_mm = dcp->panel.width_mm,
+		.height_mm = dcp->panel.height_mm,
+	};
+	struct device_node *np;
+	const char *label;
+	struct resource res;
+	void *data;
+	int ret = -ENODATA;
+
+	/* Explicit generic label when no serial or product is provided. */
+	strscpy(panel.identity.name, "Apple Panel", sizeof(panel.identity.name));
+	for_each_compatible_node(np, NULL, "phram") {
+		if (of_property_read_string(np, "label", &label) || strcmp(label, "adt"))
+			continue;
+		if (of_address_to_resource(np, 0, &res) ||
+		    !resource_size(&res) || resource_size(&res) > SZ_16M)
+			break;
+		data = memremap(res.start, resource_size(&res), MEMREMAP_WB);
+		if (!data)
+			break;
+		ret = dcp_panel_adt_parse(data, resource_size(&res), &panel);
+		memunmap(data);
+		break;
+	}
+	of_node_put(np);
+	/* The board's OF panel dimensions remain valid if ADT has none. */
+	dcp->panel.width_mm = panel.width_mm;
+	dcp->panel.height_mm = panel.height_mm;
+	dcp->desktop->panel_adt_identity = panel.identity;
+	dev_info(dcp->dev, "panel identity fallback: ADT %s, OF dimensions %ux%u mm\n",
+		 ret ? "unavailable" : "read", panel.width_mm, panel.height_mm);
+}
+
 /* Internal panel identity has no detachable Type-C service or EDID transport. */
 void dcp_panel_metadata_replace(struct apple_dcp *dcp,
 				const struct dcp_display_metadata *metadata)
@@ -819,14 +865,46 @@ void dcp_panel_metadata_replace(struct apple_dcp *dcp,
 		dcp_queue_hotplug(dcp->connector);
 }
 
+/* Preserve a validated real EDID ahead of any metadata-derived fallback. */
+void dcp_panel_edid_receive(struct apple_dcp *dcp, const void *blob, size_t len)
+{
+	const struct drm_edid *edid;
+	const u8 *raw;
+	size_t size;
+	unsigned long flags;
+	bool changed;
+
+	if (dcp->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP || !dcp_has_panel(dcp) ||
+	    parse_panel_edid_data(blob, len, &raw, &size))
+		return;
+	edid = drm_edid_alloc(raw, size);
+	if (!edid)
+		return;
+	if (!drm_edid_valid(edid)) {
+		drm_edid_free(edid);
+		return;
+	}
+	spin_lock_irqsave(&dcp->metadata.lock, flags);
+	changed = size != dcp->desktop->panel_raw_edid_size ||
+		  memcmp(raw, dcp->desktop->panel_raw_edid, size);
+	if (changed) {
+		memcpy(dcp->desktop->panel_raw_edid, raw, size);
+		dcp->desktop->panel_raw_edid_size = size;
+		dcp->desktop->panel_metadata_generation++;
+	}
+	spin_unlock_irqrestore(&dcp->metadata.lock, flags);
+	drm_edid_free(edid);
+	if (changed && dcp->connector)
+		dcp_queue_hotplug(dcp->connector);
+}
+
 bool dcp_panel_metadata_current(struct apple_dcp *dcp, u64 generation)
 {
 	unsigned long flags;
 	bool valid;
 
 	spin_lock_irqsave(&dcp->metadata.lock, flags);
-	valid = dcp->desktop->panel_metadata_valid &&
-		generation == dcp->desktop->panel_metadata_generation;
+	valid = generation == dcp->desktop->panel_metadata_generation;
 	spin_unlock_irqrestore(&dcp->metadata.lock, flags);
 	return valid;
 }
@@ -837,21 +915,27 @@ const struct drm_edid *dcp_panel_edid_snapshot(struct apple_dcp *dcp,
 {
 	struct dcp_display_metadata metadata;
 	const struct drm_edid *edid;
+	u8 *raw;
+	size_t size;
 	unsigned long flags;
-	bool valid;
 
+	raw = kmalloc(sizeof(dcp->desktop->panel_raw_edid), GFP_KERNEL);
+	if (!raw)
+		return ERR_PTR(-ENOMEM);
 	spin_lock_irqsave(&dcp->metadata.lock, flags);
-	valid = dcp->desktop->panel_metadata_valid;
-	if (valid) {
-		metadata = dcp->desktop->panel_metadata;
-		*generation = dcp->desktop->panel_metadata_generation;
-	}
+	size = dcp->desktop->panel_raw_edid_size;
+	memcpy(raw, dcp->desktop->panel_raw_edid, size);
+	metadata = dcp->desktop->panel_metadata_valid ?
+		dcp->desktop->panel_metadata : dcp->desktop->panel_adt_identity;
+	*generation = dcp->desktop->panel_metadata_generation;
 	spin_unlock_irqrestore(&dcp->metadata.lock, flags);
-	if (!valid)
-		return ERR_PTR(-ENODATA);
 	/* The caller supplies the same retained catalog it is publishing. */
-	edid = dcp_panel_edid(&metadata, modes, count,
-			      dcp->panel.width_mm, dcp->panel.height_mm);
+	edid = size ? drm_edid_alloc(raw, size) :
+		dcp_panel_edid(&metadata, modes, count,
+			       dcp->panel.width_mm, dcp->panel.height_mm);
+	kfree(raw);
+	if (!edid)
+		return ERR_PTR(-ENOMEM);
 	if (!IS_ERR(edid) && !dcp_panel_metadata_current(dcp, *generation)) {
 		drm_edid_free(edid);
 		return ERR_PTR(-ESTALE);
@@ -4823,6 +4907,8 @@ static int dcp_comp_bind_pipe(struct device *dev, struct device *main, void *dat
 		of_property_read_u32(panel_np, height_prop[!dcp->notch_height],
 				     &dcp->panel.height_mm);
 
+		if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP)
+			dcp_panel_adt_identity(dcp);
 		of_node_put(panel_np);
 		dcp->fixed_connector_type = DRM_MODE_CONNECTOR_eDP;
 		dcp->connector_type = DRM_MODE_CONNECTOR_eDP;

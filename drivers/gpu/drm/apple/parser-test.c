@@ -14,6 +14,7 @@
 #include "dcp-property.h"
 #include "iomfb_internal.h"
 #include "parser.h"
+#include "dcp-panel-adt.h"
 
 static struct device parser_device = {
 	.init_name = "apple-display-parser-test",
@@ -1413,7 +1414,19 @@ static void parser_identity_bounds(struct kunit *test)
 				parser_identity_emit, &seen), 0);
 }
 
+static void parser_adt_bounds(struct kunit *test)
+{
+	struct dcp_panel_adt panel = { .identity = { .manufacturer = "APP" } };
+	struct dcp_panel_adt before = panel;
+	__le32 huge[] = { cpu_to_le32(4097), 0 };
+
+	KUNIT_EXPECT_EQ(test, dcp_panel_adt_parse(huge, sizeof(huge), &panel), -E2BIG);
+	KUNIT_EXPECT_MEMEQ(test, &panel, &before, sizeof(panel));
+	KUNIT_EXPECT_EQ(test, dcp_panel_adt_parse(NULL, 0, &panel), -EINVAL);
+}
+
 static struct kunit_case parser_cases[] = {
+	KUNIT_CASE(parser_adt_bounds),
 	KUNIT_CASE(parser_identity_bounds),
 	KUNIT_CASE(parser_panel_identity_stable),
 	KUNIT_CASE(parser_panel_identity),

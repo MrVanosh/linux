@@ -11,6 +11,7 @@
 #include "dcp-metadata-epoch.h"
 
 struct apple_dcp;
+int parse_panel_edid_data(const void *blob, size_t len, const u8 **edid, size_t *size);
 typedef void (*dcp_identity_key_fn)(void *data, const char *key, u32 key_len,
 				    u32 type, u32 size, u32 depth);
 int parse_identity_keys(const void *blob, size_t len, dcp_identity_key_fn emit, void *data);

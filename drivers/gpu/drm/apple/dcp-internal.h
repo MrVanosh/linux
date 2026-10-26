@@ -245,9 +245,12 @@ struct dcp_desktop_state {
 	bool mode_live;
 	/* Identity supplied by this fixed panel, independent of optional color data. */
 	struct dcp_display_metadata panel_metadata;
+	struct dcp_display_metadata panel_adt_identity;
 	u64 panel_metadata_generation;
 	bool panel_metadata_valid;
 	u32 identity_log_count;
+	u8 panel_raw_edid[4096];
+	size_t panel_raw_edid_size;
 	/* RX records an unsupported callback until the modeset RPC has drained. */
 	bool modeset_active;
 	bool modeset_callback_error;
@@ -896,5 +899,7 @@ static inline bool dcp_ext_dptx_607(const struct apple_dcp *dcp)
 
 void dcp_trace_panel_property(struct apple_dcp *dcp, int tag, const char *key,
 			      size_t key_len, const void *blob, size_t len);
+
+void dcp_panel_edid_receive(struct apple_dcp *dcp, const void *blob, size_t len);
 
 #endif /* __APPLE_DCP_INTERNAL_H__ */
