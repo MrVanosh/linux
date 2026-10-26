@@ -275,6 +275,12 @@ const struct drm_edid *dcp_panel_edid(const struct dcp_display_metadata *metadat
 		mode.clock = DIV_ROUND_CLOSEST(mode.clock, 10) * 10;
 		ret = dcp_metadata_timing(&candidate, &mode, &dimensions);
 		if (!ret && (!timing || (!preferred && (mode.type & DRM_MODE_TYPE_PREFERRED)))) {
+			struct detailed_pixel_timing *pixel = &candidate.data.pixel_data;
+
+			/* The base size is in cm, but the DTD preserves exact panel mm. */
+			pixel->width_mm_lo = width_mm;
+			pixel->height_mm_lo = height_mm;
+			pixel->width_height_mm_hi = (width_mm >> 8) << 4 | height_mm >> 8;
 			block.detailed_timings[0] = candidate;
 			timing = true;
 			preferred = mode.type & DRM_MODE_TYPE_PREFERRED;

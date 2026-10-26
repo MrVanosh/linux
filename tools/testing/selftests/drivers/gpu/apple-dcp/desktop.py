@@ -478,6 +478,8 @@ int main(int argc, char **argv)
     assert(bytes[8]==0x52 && bytes[9]==0x74 && bytes[10]==42 && !bytes[11]);
     assert(bytes[12]==0x78 && bytes[13]==0x56 && bytes[14]==0x34 && bytes[15]==0x12);
     assert(bytes[18]==1 && bytes[19]==4 && bytes[21]==35 && bytes[22]==22 && bytes[23]==0xff);
+    assert(((unsigned)bytes[66] | (unsigned)(bytes[68] >> 4) << 8)==345);
+    assert(((unsigned)bytes[67] | (unsigned)(bytes[68] & 15) << 8)==223);
     assert(bytes[72+3]==EDID_DETAIL_MONITOR_NAME && bytes[90+3]==EDID_DETAIL_MONITOR_SERIAL);
     assert(!memcmp(bytes+90+5,"12345678\n",9));
     if(argc==2) {FILE *file=fopen(argv[1],"wb");assert(file);assert(fwrite(bytes,128,1,file)==1);fclose(file);}
