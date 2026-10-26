@@ -863,7 +863,9 @@ static bool atomic_add_unless(atomic_t *n,int add,int unless)
 #define min_t(t,a,b) ((t)(a)<(t)(b)?(t)(a):(t)(b))
 #define DCP_FIRMWARE_V_26_6_DESKTOP 5
 struct apple_dcp {int fw_compat;bool has_panel;void *dev;struct {atomic_t identity_log_count[4];} *desktop;};
-static bool panel_identity_debug;
+static bool kms_debug;
+#define DRM_UT_KMS 4
+static bool drm_debug_enabled(int category) {assert(category==DRM_UT_KMS);return kms_debug;}
 static unsigned messages;
 static char output[256];
 static bool dcp_has_panel(struct apple_dcp *d) {return d->has_panel;}
@@ -889,7 +891,7 @@ int main(void)
     __typeof__(*d.desktop) desktop={0};d.desktop=&desktop;
     const char secret[]="SYNTHETIC_VALUE_NOT_FOR_LOGS";
     dcp_trace_panel_property(&d,561,"Property",8,secret,sizeof(secret));assert(!messages);
-    panel_identity_debug=true;d.fw_compat=1;
+    kms_debug=true;d.fw_compat=1;
     dcp_trace_panel_property(&d,561,"Property",8,secret,sizeof(secret));assert(!messages);
     d.fw_compat=5;d.has_panel=false;
     dcp_trace_panel_property(&d,561,"Property",8,secret,sizeof(secret));assert(!messages);

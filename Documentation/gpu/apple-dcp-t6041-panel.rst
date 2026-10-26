@@ -77,8 +77,8 @@ updates for the same vendor/product retain known optional identity fields.
 Desktop identity diagnostics and fallback
 -----------------------------------------
 
-Enable ``appledrm.panel_identity_debug=1`` for a diagnostic boot (or set the
-module's ``panel_identity_debug`` parameter before a modeset). D552, D561,
+Identity inspection uses the existing DRM KMS debug category (``drm.debug``
+bit 2), with no driver-specific switch. When that category is enabled, D552, D561,
 D114 and chunked property delivery report the outer key, serialized key names,
 value type numbers and lengths. D000 identifies chunked delivery. Type numbers
 are dictionary 1, array 2, integer 4, string 9, blob 10 and boolean 11. Values
@@ -86,7 +86,8 @@ are never printed. Each property walk stops at depth 4 or 64 objects, and the
 DCP stops after 128 diagnostic records per callback class (512 total), with bounded
 inspection-status lines in addition. Atomic reservations include framing records. D552, D561, D114 and chunked delivery have
 separate budgets so periodic statistics cannot hide the panel setters.
-The switch defaults off. Malformed serialization only stops inspection.
+When KMS debugging is disabled no inspection budget is consumed. Malformed
+serialization only stops inspection.
 
 A real EDID with a usable identity takes priority. It may arrive as raw bytes,
 a serialized blob, or an ``EDID``, ``edid`` or ``IODisplayEDID`` blob nested

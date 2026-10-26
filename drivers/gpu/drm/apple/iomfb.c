@@ -30,6 +30,7 @@
 #include <drm/drm_gem_dma_helper.h>
 #include <drm/drm_modeset_lock.h>
 #include <drm/drm_probe_helper.h>
+#include <drm/drm_print.h>
 #include <drm/drm_vblank.h>
 
 #include "dcp.h"
@@ -39,11 +40,6 @@
 #include "iomfb_m4.h"
 #include "parser.h"
 #include "trace.h"
-
-/* Enable for one diagnostic boot with appledrm.panel_identity_debug=1. */
-static bool panel_identity_debug;
-module_param(panel_identity_debug, bool, 0600);
-MODULE_PARM_DESC(panel_identity_debug, "Bounded desktop panel property keys and types (no values)");
 
 struct dcp_identity_trace {
 	struct apple_dcp *dcp;
@@ -74,7 +70,7 @@ void dcp_trace_panel_property(struct apple_dcp *dcp, int tag, const char *key,
 	u32 slot = tag == 552 ? 0 : tag == 561 ? 1 : tag == 114 ? 2 : 3;
 	int ret;
 
-	if (!READ_ONCE(panel_identity_debug) ||
+	if (!drm_debug_enabled(DRM_UT_KMS) ||
 	    dcp->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP || !dcp_has_panel(dcp))
 		return;
 	trace.dcp = dcp;
