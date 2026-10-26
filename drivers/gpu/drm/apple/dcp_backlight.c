@@ -113,6 +113,30 @@ static void dcp_backlight_desktop_kick(struct apple_dcp *dcp)
 		schedule_work(&dcp->bl_update_wq);
 }
 
+/*
+ * Match the backlight core's change event without force_update(), which
+ * would replace a user's target with an intermediate fade level.
+ */
+static void dcp_backlight_notify_work(struct work_struct *work)
+{
+	struct apple_dcp *dcp = container_of(work, struct apple_dcp, backlight.notify_work);
+	struct backlight_device *bd = READ_ONCE(dcp->brightness.bl_dev);
+	char *envp[] = { "SOURCE=unknown", NULL };
+
+	if (!bd || READ_ONCE(dcp->quiescing))
+		return;
+	kobject_uevent_env(&bd->dev.kobj, KOBJ_CHANGE, envp);
+	sysfs_notify(&bd->dev.kobj, NULL, "brightness");
+	sysfs_notify(&bd->dev.kobj, NULL, "actual_brightness");
+}
+
+static void dcp_backlight_notify(struct apple_dcp *dcp)
+{
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP &&
+	    !READ_ONCE(dcp->quiescing) && READ_ONCE(dcp->brightness.bl_dev))
+		schedule_work(&dcp->backlight.notify_work);
+}
+
 /* A loader hint describes the inherited level, not a new brightness request. */
 static void dcp_backlight_sync_hint(struct apple_dcp *dcp)
 {
@@ -128,6 +152,7 @@ static void dcp_backlight_sync_hint(struct apple_dcp *dcp)
 		bd->props.brightness = dcp->backlight.state.target;
 	spin_unlock_irqrestore(&dcp->backlight.lock, flags);
 	mutex_unlock(&bd->ops_lock);
+	dcp_backlight_notify(dcp);
 }
 
 int dcp_backlight_takeover(struct apple_dcp *dcp, u32 millinits)
@@ -304,6 +329,7 @@ void dcp_backlight_stop(struct apple_dcp *dcp)
 {
 	cancel_delayed_work_sync(&dcp->backlight.fade_work);
 	cancel_delayed_work_sync(&dcp->backlight.retry_work);
+	cancel_work_sync(&dcp->backlight.notify_work);
 }
 
 static void dcp_backlight_release(void *data)
@@ -320,6 +346,7 @@ int dcp_backlight_init(struct apple_dcp *dcp, struct device *dev)
 {
 	spin_lock_init(&dcp->backlight.lock);
 	INIT_DELAYED_WORK(&dcp->backlight.fade_work, dcp_backlight_fade_work);
+	INIT_WORK(&dcp->backlight.notify_work, dcp_backlight_notify_work);
 	INIT_DELAYED_WORK(&dcp->backlight.retry_work, dcp_backlight_retry_work);
 	return devm_add_action_or_reset(dev, dcp_backlight_release, dcp);
 }
@@ -464,16 +491,21 @@ void dcp_backlight_desktop_finish(struct apple_dcp *dcp, u32 id,
 {
 	unsigned long flags;
 	unsigned int delay;
-	bool finished, pending;
+	bool finished, pending, changed;
+	int previous;
 
 	if (!dcp_backlight_desktop(dcp))
 		return;
 	spin_lock_irqsave(&dcp->backlight.lock, flags);
+	previous = dcp_bl_actual(&dcp->backlight.state);
 	finished = dcp_bl_swap_finish(&dcp->backlight.state,
 				      &dcp->desktop->backlight, id, reply, accepted);
+	changed = previous != dcp_bl_actual(&dcp->backlight.state);
 	delay = dcp_bl_retry_delay(&dcp->backlight.state);
 	pending = dcp->backlight.state.dirty;
 	spin_unlock_irqrestore(&dcp->backlight.lock, flags);
+	if (changed)
+		dcp_backlight_notify(dcp);
 	if (!finished || READ_ONCE(dcp->quiescing) || READ_ONCE(dcp->crashed))
 		return;
 	if (delay)

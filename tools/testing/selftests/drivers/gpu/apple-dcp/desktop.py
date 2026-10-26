@@ -208,6 +208,7 @@ def brightness_takeover(root):
         'static bool dcp_backlight_controls_device('))
     return prefix + r'''
 #include <stddef.h>
+#include <string.h>
 #define READ_ONCE(x) (x)
 #define DCP_FIRMWARE_V_26_6_DESKTOP 5
 #define DCP_FIRMWARE_H17P 1
@@ -256,6 +257,8 @@ static const int dcp_backlight_ops;
 static void *bl_get_data(struct backlight_device *bd) {return bd->data;}
 static bool iomfb_is_m4(struct apple_dcp *d) {(void)d;return false;}
 bool dcp_backlight_active(struct apple_dcp *d) {(void)d;return false;}
+static unsigned notify_count;
+static void dcp_backlight_notify(struct apple_dcp *d) {(void)d;notify_count++;}
 static void dcp_backlight_desktop_kick(struct apple_dcp *d) {(void)d;}
 static void dcp_backlight_kick(struct apple_dcp *d) {(void)d;}
 static unsigned fades;
@@ -739,6 +742,69 @@ int main(void)
     }
     u32 huge[]={5000,0};assert(dcp_panel_adt_parse(huge,sizeof(huge),&panel)==-E2BIG);
     assert(dcp_panel_adt_parse(NULL,0,&panel)==-EINVAL);
+    return 0;
+}
+'''
+
+
+def brightness_notifications(root):
+    import display
+    prefix=display.backlight(root).split('static void completed(')[0]
+    prefix=prefix.replace('static inline ', 'static inline __attribute__((unused)) ')
+    source=(root/'drivers/gpu/drm/apple/dcp_backlight.c').read_text()
+    functions='\n'.join(block(source,name) for name in (
+        'static void dcp_backlight_notify_work(', 'static void dcp_backlight_notify(',
+        'static bool dcp_backlight_desktop(', 'void dcp_backlight_desktop_finish('))
+    return prefix+r'''
+#include <stddef.h>
+#include <string.h>
+#define READ_ONCE(x) (x)
+#define DCP_FIRMWARE_V_26_6_DESKTOP 5
+#define spin_lock_irqsave(p,f) do {assert(!*(p));*(p)=true;(f)=0;} while(0)
+#define spin_unlock_irqrestore(p,f) do {assert(*(p));*(p)=false;(void)(f);} while(0)
+#define container_of(p,t,m) ((t *)((char *)(p)-offsetof(t,m)))
+#define KOBJ_CHANGE 1
+#define system_dfl_wq NULL
+#define msecs_to_jiffies(x) (x)
+struct work_struct {int unused;};
+struct backlight_device {struct {int kobj;} dev;struct {u32 brightness;} props;};
+struct apple_dcp {
+    int fw_compat;bool quiescing,crashed;
+    struct {struct backlight_device *bl_dev;} brightness;
+    struct {bool lock;struct dcp_backlight_state state;struct work_struct notify_work;int retry_work;} backlight;
+    struct {struct dcp_backlight_swap backlight;} *desktop;
+};
+static unsigned events,brightness,actual,kicks;
+static void kobject_uevent_env(int *k,int action,char **env)
+{(void)k;assert(action==1 && !strcmp(env[0],"SOURCE=unknown") && !env[1]);events++;}
+static void sysfs_notify(int *k,void *dir,const char *name)
+{(void)k;assert(!dir);if(!strcmp(name,"brightness"))brightness++;else {assert(!strcmp(name,"actual_brightness"));actual++;}}
+static void dcp_backlight_notify_work(struct work_struct *);
+static void schedule_work(struct work_struct *w) {dcp_backlight_notify_work(w);}
+static void dcp_backlight_kick(struct apple_dcp *d) {assert(!d->backlight.lock);kicks++;}
+static void mod_delayed_work(void *q,int *w,unsigned delay) {(void)q;(void)w;assert(delay);}
+'''+functions+r'''
+int main(void)
+{
+    struct backlight_device bd={.props={500}};
+    struct apple_dcp d={.fw_compat=5,.brightness={&bd}};
+    __typeof__(*d.desktop) desktop={0};d.desktop=&desktop;
+    assert(!dcp_bl_init(&d.backlight.state,600,true,100,false,0));
+    assert(!dcp_bl_request(&d.backlight.state,500,false,false));
+    u32 target=d.backlight.state.target;
+    /* Accepted/completed presents update userspace once, duplicate callbacks do not. */
+    assert(!dcp_bl_swap_prepare(&d.backlight.state,&desktop.backlight,7,true));
+    dcp_backlight_desktop_finish(&d,8,false,true);assert(!events);
+    dcp_backlight_desktop_finish(&d,7,true,true);assert(!events);
+    dcp_backlight_desktop_finish(&d,7,false,true);assert(events==1 && brightness==1 && actual==1);
+    dcp_backlight_desktop_finish(&d,7,false,true);assert(events==1);
+    assert(d.backlight.state.target==target && bd.props.brightness==500);
+    assert(!dcp_bl_request(&d.backlight.state,250,false,false));
+    assert(!dcp_bl_swap_prepare(&d.backlight.state,&desktop.backlight,9,true));
+    dcp_backlight_desktop_finish(&d,9,true,false);assert(events==1);
+    d.quiescing=true;dcp_backlight_notify(&d);assert(events==1);
+    d.quiescing=false;d.fw_compat=1;dcp_backlight_notify(&d);assert(events==1);
+    d.fw_compat=5;d.brightness.bl_dev=NULL;dcp_backlight_notify(&d);assert(events==1);
     return 0;
 }
 '''

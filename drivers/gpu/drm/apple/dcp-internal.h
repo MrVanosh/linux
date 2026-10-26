@@ -700,6 +700,7 @@ struct apple_dcp {
 		void (*kick)(struct apple_dcp *dcp);
 		/* Steps a running fade; fade_start is its start in jiffies. */
 		struct delayed_work fade_work;
+		struct work_struct notify_work;
 		struct delayed_work retry_work;
 		unsigned long fade_start;
 		/* Rate limit for firmware re-send requests. */
