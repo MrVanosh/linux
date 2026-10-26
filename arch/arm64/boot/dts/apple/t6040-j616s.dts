@@ -26,6 +26,7 @@
 		/* used by the loader to hand over the display */
 		dcp = &dcp;
 		disp0 = &display;
+		disp0-piodma = &disp0_piodma;
 		/* the boot loader finds the GPU node through this alias */
 		gpu = &gpu;
 	};
@@ -72,6 +73,15 @@
 		/* the firmware's main memory, the driver allocates above it */
 		isp_heap: isp-heap {
 			iommu-addresses = <&isp 0x100 0x0 0x0 0x2000000>;
+		};
+
+		/*
+		 * Text segment of the loaded GPU firmware (ADT gfx-asc
+		 * segment-ranges[0]); the driver identifies the build from it.
+		 */
+		gpu_fw_text: gpu-fw-text@10000be4000 {
+			reg = <0x100 0x00be4000 0x0 0x60000>;
+			no-map;
 		};
 
 		/*
@@ -820,9 +830,9 @@
  */
 &gpu {
 	memory-region = <&uat_ttbs>, <&uat_pagetables>, <&uat_handoff>,
-			<&gpu_fw_data>, <&uat_l2_pagetables>;
+			<&gpu_fw_data>, <&uat_l2_pagetables>, <&gpu_fw_text>;
 	memory-region-names = "ttbs", "pagetables", "handoff", "fw-data",
-			      "l2-pagetables";
+			      "l2-pagetables", "fw-text";
 	operating-points-v2 = <&gpu_opp>;
 	apple,cs-opp = <&gpu_cs_opp>;
 	apple,afr-opp = <&gpu_afr_opp>;

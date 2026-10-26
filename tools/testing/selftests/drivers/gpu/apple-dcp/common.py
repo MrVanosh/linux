@@ -47,6 +47,8 @@ def source_defines(source):
 def tipd_pm_header(root):
     """CD321x PM state machine for host units, with a host clamp() for minmax.h."""
     header = (root / 'drivers/usb/typec/tipd/cd321x-pm.h').read_text()
+    # Use the host errno namespace, not the AFK Linux-numbered shim.
+    header = header.replace('#include <linux/errno.h>', '#include <errno.h>')
     # Host integer types; a repeated identical typedef is valid C11.
     header = header.replace('#include <linux/types.h>',
         '#include <stdint.h>\ntypedef uint32_t u32;')
@@ -91,6 +93,12 @@ ATC_POST_TUNABLE = ('atcphy_configure_post_tunable_t8103', 'atcphy_wake_common_t
 
 # Helpers that the fixed-hub SuperSpeed handover split out of extracted functions
 ATC_SPLIT = ('atcphy_pipe_live', 'atcphy_usb3_route')
+
+
+# The retryable T8103-generation USB3 handoff: the bounded live lock and the
+# park of a live legacy PIPE, which the extracted PIPE, mux, reset and route
+# functions call. Older sources have neither; atc_function() then yields ''.
+ATC_T8103_LIVE = ('atcphy_pipehandler_lock_live', 'atcphy_park_live_t8103_pipehandler')
 
 
 def atc_function(source, name):

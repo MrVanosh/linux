@@ -91,6 +91,48 @@ static bool trampoline_passthrough_dict_v26_6(struct apple_dcp *dcp, int tag,
 	return true;
 }
 
+/*
+ * unmap_piodma (D202): the buffer id, the id again, the DVA (unaligned) and a
+ * trailing word. The older firmware sends the DVA after a virtual address.
+ */
+struct dcp_unmap_buf_req_v26_6 {
+	__le64 buffer;
+	__le32 id;
+	__le64 dva;
+	__le32 unk;
+} __packed;
+static_assert(sizeof(struct dcp_unmap_buf_req_v26_6) == 24);
+
+static bool trampoline_unmap_piodma_v26_6(struct apple_dcp *dcp, int tag,
+					  void *out, void *in)
+{
+	const struct dcp_unmap_buf_req_v26_6 *wire = in;
+	struct dcp_unmap_buf_resp request = {
+		.buffer = get_unaligned_le64(&wire->buffer),
+		.dva = get_unaligned_le64(&wire->dva),
+	};
+
+	trace_iomfb_callback(dcp, tag, "dcpep_cb_unmap_piodma");
+	dcpep_unmap_piodma(dcp, &request);
+
+	return true;
+}
+
+/*
+ * release_mem_desc (D454): the firmware sends the 32-bit descriptor id and
+ * wants a 32-bit result, where the older firmware took a byte.
+ */
+static bool trampoline_release_mem_desc_v26_6(struct apple_dcp *dcp, int tag,
+					      void *out, void *in)
+{
+	u32 id = get_unaligned_le32(in);
+
+	trace_iomfb_callback(dcp, tag, "dcpep_cb_release_mem_desc");
+	put_unaligned_le32(dcpep_cb_release_mem_desc(dcp, &id), out);
+
+	return true;
+}
+
 static const iomfb_cb_handler cb_handlers[IOMFB_MAX_CB] = {
 	[0] = trampoline_true, /* did_boot_signal */
 	[1] = trampoline_true, /* did_power_on_signal */
@@ -120,6 +162,8 @@ static const iomfb_cb_handler cb_handlers[IOMFB_MAX_CB] = {
 	[129] = trampoline_prop_end,
 	[134] = trampoline_zero,
 	[201] = trampoline_map_piodma,
+	/* a mode change retires its piodma buffers, then their descriptors */
+	[202] = trampoline_unmap_piodma_v26_6,
 	[206] = iomfbep_cb_match_pmu_service_2,
 	[207] = iomfbep_cb_match_backlight_service,
 	[208] = trampoline_nop, /* update_backlight_factor_prop */
@@ -134,6 +178,7 @@ static const iomfb_cb_handler cb_handlers[IOMFB_MAX_CB] = {
 	[414] = trampoline_sr_set_property_int,
 	[415] = trampoline_true, /* sr_set_property_bool */
 	[451] = trampoline_allocate_buffer,
+	[454] = trampoline_release_mem_desc_v26_6,
 	[552] = trampoline_true, /* set_property_dict_0 */
 	[561] = trampoline_true, /* set_property_dict */
 	[563] = trampoline_true, /* set_property_int */

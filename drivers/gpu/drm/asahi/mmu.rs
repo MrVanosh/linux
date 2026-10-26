@@ -1201,12 +1201,67 @@ pub(crate) struct KernelMappingInner {
     mapped_size: usize,
 }
 
-/// Prepared CPU timestamp access; destruction happens after completion signalling.
+/// A kernel CPU mapping of a timestamp buffer's GEM backing. Dropping it takes the object's
+/// reservation lock, so it must not be dropped where fence producers run.
+pub(crate) struct TimestampVmap(kernel::drm::gem::shmem::VMapOwned<gem::AsahiObject>);
+
+impl TimestampVmap {
+    pub(crate) fn new(gem: &gem::Object) -> Result<Self> {
+        Ok(Self(gem.owned_vmap::<0>()?))
+    }
+
+    fn size(&self) -> usize {
+        use kernel::drm::gem::BaseObject;
+        self.0.owner().size()
+    }
+
+    /// Writes a timestamp at byte `offset` of the GEM object. Aligned results use a complete
+    /// atomic store; byte stores support unaligned destinations without creating mutable
+    /// aliases. An unaligned complete timestamp is not atomic. Out-of-range offsets are refused
+    /// when the destination is prepared, and ignored here.
+    pub(crate) fn write(&self, offset: usize, value: u64) {
+        if offset.checked_add(size_of::<u64>()).is_none_or(|end| end > self.size()) {
+            return;
+        }
+        // Completion runs in task context. Bindings of the same BO share this lock,
+        // so aligned u64 and overlapping unaligned byte stores never race in Rust.
+        let _guard = self.0.owner().timestamp_lock.lock();
+        // SAFETY: The complete extent was checked above, inside this pinned vmap.
+        let base = self.0.addr.cast::<u8>();
+        let pointer = unsafe { base.add(offset) };
+        if pointer as usize % core::mem::align_of::<AtomicU64>() == 0 {
+            // SAFETY: All eight bytes were checked above; the vmap pins the backing.
+            // A naturally aligned query result becomes available in one complete store.
+            let destination = unsafe { &*pointer.cast::<AtomicU64>() };
+            destination.store(value.to_le(), Ordering::Relaxed);
+        } else {
+            for (index, byte) in value.to_le_bytes().into_iter().enumerate() {
+                // SAFETY: The complete eight-byte extent was checked above. The owned
+                // vmap pins its backing; byte atomics permit unaligned and overlapping
+                // timestamp destinations without mutable slice aliases.
+                let destination = unsafe { &*base.add(offset + index).cast::<AtomicU8>() };
+                destination.store(byte, Ordering::Relaxed);
+            }
+        }
+        // A CPU-retired query can be consumed by a later GPU command. WRITEBACK
+        // objects use a cacheable vmap, while GPU mappings need not snoop that cache.
+        // Publish the bytes before signalling the completion fence or queue frontier.
+        if self.0.owner().is_writeback() {
+            crate::pgtable::clean_poc(pointer, size_of::<u64>());
+        }
+        crate::pgtable::poc_barrier();
+    }
+}
+
+/// Prepared CPU timestamp access with its own vmap; destruction happens after completion
+/// signalling.
+#[cfg(CONFIG_DRM_ASAHI_G16)]
 pub(crate) struct TimestampMapping {
-    mapping: kernel::drm::gem::shmem::VMapOwned<gem::AsahiObject>,
+    mapping: TimestampVmap,
     offset: usize,
 }
 
+#[cfg(CONFIG_DRM_ASAHI_G16)]
 impl TimestampMapping {
     /// Prepare one bounded CPU timestamp destination on retained GEM backing.
     pub(crate) fn new(gem: &gem::Object, offset: usize) -> Result<Self> {
@@ -1215,39 +1270,13 @@ impl TimestampMapping {
             return Err(ERANGE);
         }
         Ok(Self {
-            mapping: gem.owned_vmap::<0>()?,
+            mapping: TimestampVmap::new(gem)?,
             offset,
         })
     }
 
     pub(crate) fn write(&self, value: u64) {
-        // Completion runs in task context. Bindings of the same BO share this lock,
-        // so aligned u64 and overlapping unaligned byte stores never race in Rust.
-        let _guard = self.mapping.owner().timestamp_lock.lock();
-        // SAFETY: timestamp_mapping checked the complete extent inside this pinned vmap.
-        let base = self.mapping.addr.cast::<u8>();
-        let pointer = unsafe { base.add(self.offset) };
-        if pointer as usize % core::mem::align_of::<AtomicU64>() == 0 {
-            // SAFETY: timestamp_mapping checked all eight bytes; the vmap pins the backing.
-            // A naturally aligned query result becomes available in one complete store.
-            let destination = unsafe { &*pointer.cast::<AtomicU64>() };
-            destination.store(value.to_le(), Ordering::Relaxed);
-        } else {
-            for (index, byte) in value.to_le_bytes().into_iter().enumerate() {
-                // SAFETY: timestamp_mapping checked the complete eight-byte extent.
-                // The owned vmap pins its backing; byte atomics permit unaligned and
-                // overlapping timestamp destinations without mutable slice aliases.
-                let destination = unsafe { &*base.add(self.offset + index).cast::<AtomicU8>() };
-                destination.store(byte, Ordering::Relaxed);
-            }
-        }
-        // A CPU-retired query can be consumed by a later GPU command. WRITEBACK
-        // objects use a cacheable vmap, while GPU mappings need not snoop that cache.
-        // Publish the bytes before signalling the completion fence or queue frontier.
-        if self.mapping.owner().is_writeback() {
-            crate::pgtable::clean_poc(pointer, size_of::<u64>());
-        }
-        crate::pgtable::poc_barrier();
+        self.mapping.write(self.offset, value);
     }
 }
 
@@ -1285,7 +1314,15 @@ impl KernelMapping {
     /// use a complete atomic store; byte stores support unaligned destinations without
     /// creating mutable aliases. An unaligned complete timestamp is not atomic.
     /// Retain CPU access before this destination's completion fence is published.
+    #[cfg(CONFIG_DRM_ASAHI_G16)]
     pub(crate) fn timestamp_mapping(&self, offset: usize) -> Result<TimestampMapping> {
+        let gem = self.0._gem.as_ref().ok_or(EINVAL)?;
+        TimestampMapping::new(gem, self.timestamp_offset(offset)?)
+    }
+
+    /// The GEM object offset of the timestamp at `offset` in this mapping, whose complete
+    /// extent lies inside both the mapping and the object.
+    pub(crate) fn timestamp_offset(&self, offset: usize) -> Result<usize> {
         use kernel::drm::gem::BaseObject;
         let gem = self.0._gem.as_ref().ok_or(EINVAL)?;
         if offset.checked_add(size_of::<u64>()).ok_or(EOVERFLOW)? > self.size() {
@@ -1296,7 +1333,12 @@ impl KernelMapping {
         if end > gem.size() {
             return Err(ERANGE);
         }
-        TimestampMapping::new(gem, start)
+        Ok(start)
+    }
+
+    /// A kernel CPU mapping of this mapping's GEM backing, for timestamp writes.
+    pub(crate) fn timestamp_vmap(&self) -> Result<TimestampVmap> {
+        TimestampVmap::new(self.0._gem.as_ref().ok_or(EINVAL)?)
     }
 
     /// Gives a fresh kernel mapping a firmware-cached prefix, preserving its tail.
@@ -2113,7 +2155,7 @@ impl Vm {
     /// Attach a status and job lifetime tracking before sharing a newly created user VM with
     /// queues, without the G17 canonical context views, shared-object footprints and idle
     /// residency reclaim of [`Self::with_status`]. Used by G15, whose user objects stay pinned.
-    #[cfg(CONFIG_DRM_ASAHI_G16)]
+    #[cfg(any(CONFIG_DRM_ASAHI_G15, CONFIG_DRM_ASAHI_G16))]
     pub(crate) fn with_tracked_status(mut self) -> Result<Self> {
         self.status = Some(Arc::pin_init(
             crate::g17::status::VmStatus::new(),
@@ -2136,7 +2178,7 @@ impl Vm {
     /// and invalidated to the point of coherency first (never only invalidated: CPU-written lines
     /// may be dirty), so the copy sees what the GPU or a write-combined CPU view stored. The
     /// mappings cannot change during the copy (GPUVM exec lock).
-    #[cfg(CONFIG_DRM_ASAHI_G16)]
+    #[cfg(any(CONFIG_DRM_ASAHI_G15, CONFIG_DRM_ASAHI_G16))]
     pub(crate) fn read_user(&self, va: u64, buf: &mut [u8]) -> Result {
         let mut inner = lock_vm(&self.gpuvm, None, false)?;
         let mut done = 0usize;
@@ -2839,7 +2881,7 @@ impl Drop for VmInner {
 
 /// Physical regions of a UAT whose handoff the generation has already established itself
 /// ([`Uat::new_adopted`]). None of them needs to be in the kernel linear map.
-#[cfg(CONFIG_DRM_ASAHI_G16)]
+#[cfg(any(CONFIG_DRM_ASAHI_G15, CONFIG_DRM_ASAHI_G16))]
 pub(crate) struct AdoptedRegions {
     /// The handoff region (PPL magic, lock and flush requests).
     pub(crate) handoff: Range<PhysicalAddr>,
@@ -2862,9 +2904,9 @@ impl Uat {
         })
     }
 
-    #[cfg(CONFIG_DRM_ASAHI_G16)]
+    #[cfg(any(CONFIG_DRM_ASAHI_G15, CONFIG_DRM_ASAHI_G16))]
     /// Map a region given by its physical range, write-combined.
-    fn map_physical(range: &Range<PhysicalAddr>, min_size: usize) -> Result<UatRegion> {
+    fn map_physical(range: &Range<PhysicalAddr>, min_size: usize, reserved_ram: bool) -> Result<UatRegion> {
         let size: usize = (range.end.checked_sub(range.start).ok_or(EINVAL)?).try_into()?;
         if size < min_size || range.start & (UAT_PGMSK as PhysicalAddr) != 0 {
             return Err(EINVAL);
@@ -2880,14 +2922,30 @@ impl Uat {
             unsafe { core::mem::transmute(kernel::types::Opaque::new(raw)) };
         // SAFETY: The UAT regions are only accessed through this mapping by the CPU; the GPU
         // reaches them through its own translation.
-        let map = unsafe { io::mem::Mem::try_new(res, io::mem::MemFlag::WC.into()) }?;
+        let flags = io::mem::MemFlag::WC;
+        #[cfg(CONFIG_DRM_ASAHI_G15)]
+        let flags = if reserved_ram {
+            // G15 admits only whole reserved RAM pages or wholly non-RAM carveouts.
+            if crate::g15::memory_mode(range.start, size as u64)?
+                == kernel::bindings::MEMREMAP_WB as u32
+            {
+                io::mem::MemFlag::WB
+            } else {
+                flags
+            }
+        } else {
+            flags
+        };
+        #[cfg(not(CONFIG_DRM_ASAHI_G15))]
+        let _ = reserved_ram;
+        let map = unsafe { io::mem::Mem::try_new(res, flags.into()) }?;
         Ok(UatRegion {
             base: range.start,
             map,
         })
     }
 
-    #[cfg(CONFIG_DRM_ASAHI_G16)]
+    #[cfg(any(CONFIG_DRM_ASAHI_G15, CONFIG_DRM_ASAHI_G16))]
     /// Creates a `Uat` for a handoff that the caller establishes itself (G15).
     ///
     /// This only maps the handoff and the TTBAT (write-combined); neither is written here. The
@@ -2907,7 +2965,7 @@ impl Uat {
         geometry: UatGeometry,
         regions: &AdoptedRegions,
     ) -> Result<Self> {
-        Self::new_adopted_with_user_upper(dev, geometry, regions, true)
+        Self::new_adopted_inner(dev, geometry, regions, true, true)
     }
 
     /// Creates the same owned-RAM adopted UAT, choosing whether application contexts also
@@ -2920,8 +2978,19 @@ impl Uat {
         regions: &AdoptedRegions,
         map_kernel_to_user: bool,
     ) -> Result<Self> {
-        let handoff_rgn = Self::map_physical(&regions.handoff, HANDOFF_SIZE)?;
-        let ttbs_rgn = Self::map_physical(&regions.ttbs, SLOTS_SIZE)?;
+        Self::new_adopted_inner(dev, geometry, regions, map_kernel_to_user, false)
+    }
+
+    #[cfg(any(CONFIG_DRM_ASAHI_G15, CONFIG_DRM_ASAHI_G16))]
+    fn new_adopted_inner(
+        dev: &driver::AsahiDrmDevice,
+        geometry: UatGeometry,
+        regions: &AdoptedRegions,
+        map_kernel_to_user: bool,
+        reserved_ram: bool,
+    ) -> Result<Self> {
+        let handoff_rgn = Self::map_physical(&regions.handoff, HANDOFF_SIZE, reserved_ram)?;
+        let ttbs_rgn = Self::map_physical(&regions.ttbs, SLOTS_SIZE, reserved_ram)?;
 
         // SAFETY: The Handoff struct layout matches the firmware's view of memory at this
         // address, and the region is at least large enough per the check above.
@@ -2997,13 +3066,13 @@ impl Uat {
         })
     }
 
-    #[cfg(CONFIG_DRM_ASAHI_G16)]
+    #[cfg(any(CONFIG_DRM_ASAHI_G15, CONFIG_DRM_ASAHI_G16))]
     /// Root of the kernel lower `Vm`, for TTBAT context 0 of an adopted handoff.
     pub(crate) fn kernel_lower_root(&self) -> PhysicalAddr {
         self.kernel_lower_vm.ttb()
     }
 
-    #[cfg(CONFIG_DRM_ASAHI_G16)]
+    #[cfg(any(CONFIG_DRM_ASAHI_G15, CONFIG_DRM_ASAHI_G16))]
     /// Root whose driver-window entry names the second-level table of [`Self::kernel_vm`]'s
     /// driver window. With [`Self::new_adopted`] this is the shadow root that no context names.
     pub(crate) fn kernel_window_root(&self) -> PhysicalAddr {
@@ -3364,7 +3433,7 @@ impl Uat {
     }
 
     /// Discards the CPU's cached lines of the no-map table regions after the firmware built its
-    /// root there during boot, before the first host edit (`UatQuirks::reserved_tables`).
+    /// root there during boot (`UatQuirks::reserved_tables`; see `ReservedTables::invalidate`).
     pub(crate) fn invalidate_reserved_tables(&self) {
         if let Some(reserved) = self.inner.reserved.as_ref() {
             reserved.invalidate();
