@@ -1396,6 +1396,9 @@ impl compute::Host for ComputeHost<'_> {
     fn compute_written(&self, priority: u8) -> u64 {
         self.port.compute_written(priority)
     }
+    fn compute_announced(&self, priority: u8) -> u64 {
+        self.port.compute_announced(priority)
+    }
     fn note_submission(&mut self) -> Result {
         self.effort.submit();
         super::Firmware::apply_shared_effort(self.init, self.effort, self.port, super::power::FULL_EFFORT)
@@ -1442,6 +1445,9 @@ impl compute::Host for DirectHost<'_> {
     }
     fn compute_written(&self, priority: u8) -> u64 {
         self.port.compute_written(priority)
+    }
+    fn compute_announced(&self, priority: u8) -> u64 {
+        self.port.compute_announced(priority)
     }
     fn note_submission(&mut self) -> Result {
         Ok(())
