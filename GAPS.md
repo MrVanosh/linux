@@ -6,7 +6,7 @@ r5 display series (`905dff774561`), camera #462 (`2114ed0c6245`), and the
 two r6 display patches. The reconstructed r6 branch is
 `wip/j616s-display-r6` at `af0a664046fb`.
 
-This series repairs regression coverage. It does not change clock, voltage,
+This series repairs regression coverage and a shared KUNIT=m WERROR build defect. It does not change clock, voltage,
 firmware policy, feature advertisement, or the submission algorithm. The major
 T6040 calibration and image-admission changes requested by this audit are
 already in the baseline. Software parity does not establish benchmark or CTS
@@ -31,6 +31,7 @@ parity. There are no J616s results for this series yet.
 | G13/G14 `submit.empty` regressions | Neo uses the G17 runtime | G16S uses that same G17 runtime, not the maintained G13/G14 workqueue | Same runtime behavior | `driver.rs`, `file.rs`, `g17/queue/mod.rs`; user-space empty submits may never reach this ioctl; trace and benchmark the paired Mesa stack |
 | G13/G14 idle wake regressions | Firmware-specific cost plus shared host overhead | G16S shares common ioctl/GEM/sync infrastructure, but has different firmware, power handling and queue backend | Same runtime behavior | `driver.rs`, `g17/power.rs`; G13/G14 benchmark ratios cannot be transferred to G16S |
 | QID capacity | Firmware floor 0; reserve protects dedicated render pairs | 25G83 reserves QIDs 0..31; public queue limit is reduced accordingly | KUnit checks floor 32 in dynamic growth and full logical queue budget tests; host resource runner follows current reserve helper | `g17/kick.rs`, `g17/runtime.rs`, `tools/asahi/g17-resource-tests.py` |
+| KUnit / WERROR config matrix | Shared test modules require KUNIT=y | Four G17 test helpers used the broader CONFIG_KUNIT guard and failed WERROR with the shipping KUNIT=m config | Helpers now use CONFIG_KUNIT = "y", matching the Rust macro; config and warning policy unchanged | `rust/macros/kunit.rs`, `g17/kick.rs`, `g17/preparation.rs`, `g17/queue/admission.rs`, `g17/runtime.rs`; verify both KUNIT=m release and KUNIT=y QEMU builds |
 | Compute ownership / retained mappings | Recovery and retirement witnesses protect mapping lifetime | Same production queue ownership, source loans, growth rollback and deferred release | Restored host fixtures and negative controls; source loans explicitly prevent premature reuse/sharing/rearming | `tools/asahi/g17-capacity-fault-tests.py`, constructor/growth/pool/release-order fixtures |
 | Restart and fault classification | Shared recovery handshake plus validated T8140 per-slot keys | Shared handshake uses 25G83 status offsets; `recovery_slot_keys=None` preserves firmware blame when keys are unknown | Same runtime behavior | `hw/t6040.rs`, `g17/initdata.rs`, `g17/recovery/attribution.rs`; successful 25G83 fault/restart qualification is still required |
 | DART / UAT | Shared mapping ownership and checked page-table borrowing | Shared MMU, with T6040 reserved tables, PoC cleaning, per-page TLBI and native GPU permission quirks | Same runtime behavior | `hw/t6040.rs`, `mmu.rs`, `pgtable.rs`; do not remove coherency or handoff requirements for a benchmark |
