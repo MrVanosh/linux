@@ -340,7 +340,8 @@ void dcp_backlight_stop(struct apple_dcp *dcp)
 {
 	cancel_delayed_work_sync(&dcp->backlight.fade_work);
 	cancel_delayed_work_sync(&dcp->backlight.retry_work);
-	cancel_work_sync(&dcp->backlight.notify_work);
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP)
+		cancel_work_sync(&dcp->backlight.notify_work);
 }
 
 static void dcp_backlight_release(void *data)

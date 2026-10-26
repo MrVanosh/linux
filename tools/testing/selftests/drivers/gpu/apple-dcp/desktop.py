@@ -781,7 +781,8 @@ def brightness_notifications(root):
     source=(root/'drivers/gpu/drm/apple/dcp_backlight.c').read_text()
     functions='\n'.join(block(source,name) for name in (
         'static void dcp_backlight_notify_work(', 'static void dcp_backlight_notify_release(', 'static void dcp_backlight_notify(',
-        'static bool dcp_backlight_desktop(', 'void dcp_backlight_desktop_finish('))
+        'static bool dcp_backlight_desktop(', 'void dcp_backlight_desktop_finish(',
+        'void dcp_backlight_stop('))
     return prefix+r'''
 #include <stddef.h>
 #include <string.h>
@@ -799,10 +800,11 @@ struct backlight_device {struct {int kobj;} dev;struct {u32 brightness;} props;}
 struct apple_dcp {
     int fw_compat;bool quiescing,crashed;
     struct {struct backlight_device *bl_dev;} brightness;
-    struct {bool lock;struct dcp_backlight_state state;struct work_struct notify_work;int retry_work;} backlight;
+    struct {bool lock;struct dcp_backlight_state state;struct work_struct notify_work;int fade_work,retry_work;} backlight;
     struct {struct dcp_backlight_swap backlight;} *desktop;
 };
-static unsigned events,brightness,actual,kicks,cancelled;
+static unsigned events,brightness,actual,kicks,cancelled,delayed_cancelled;
+static void cancel_delayed_work_sync(int *work) {(void)work;delayed_cancelled++;}
 static void cancel_work_sync(struct work_struct *w) {(void)w;cancelled++;}
 static void kobject_uevent_env(int *k,int action,char **env)
 {(void)k;assert(action==1 && !strcmp(env[0],"SOURCE=unknown") && !env[1]);events++;}
@@ -833,8 +835,10 @@ int main(void)
     dcp_backlight_desktop_finish(&d,9,true,false);assert(events==1);
     d.quiescing=true;dcp_backlight_notify(&d);assert(events==1);
     d.quiescing=false;d.fw_compat=1;dcp_backlight_notify(&d);assert(events==1);
+    dcp_backlight_stop(&d);assert(!cancelled && delayed_cancelled==2);
     d.fw_compat=5;dcp_backlight_notify_release(&d);
     assert(!d.brightness.bl_dev && cancelled==1);dcp_backlight_notify(&d);assert(events==1);
+    dcp_backlight_stop(&d);assert(cancelled==2 && delayed_cancelled==4);
     return 0;
 }
 '''
