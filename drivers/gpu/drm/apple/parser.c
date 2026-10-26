@@ -2055,11 +2055,19 @@ static int parse_identity_tree(struct dcp_parse_ctx *ctx, dcp_identity_key_fn em
 
 int parse_identity_keys(const void *blob, size_t len, dcp_identity_key_fn emit, void *data)
 {
-	struct dcp_parse_ctx ctx;
+	struct dcp_parse_ctx ctx, root;
+	const struct dcp_parse_tag *tag;
 	u32 budget = 64;
 	int ret = parse(blob, len, &ctx);
 
-	return ret ?: parse_identity_tree(&ctx, emit, data, 0, &budget);
+	if (ret)
+		return ret;
+	root = ctx;
+	tag = parse_tag(&root);
+	if (IS_ERR(tag))
+		return PTR_ERR(tag);
+	emit(data, "<root>", 6, tag->type, tag->size, 0);
+	return parse_identity_tree(&ctx, emit, data, 0, &budget);
 }
 
 /* A setter may deliver the EDID bytes directly or as an OSSerialize blob. */

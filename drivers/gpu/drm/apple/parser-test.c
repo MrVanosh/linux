@@ -1408,7 +1408,7 @@ static void parser_identity_bounds(struct kunit *test)
 
 	KUNIT_EXPECT_EQ(test, parse_identity_keys(huge, sizeof(huge),
 			parser_identity_emit, &seen), -E2BIG);
-	KUNIT_EXPECT_EQ(test, seen, 0U);
+	KUNIT_EXPECT_EQ(test, seen, 1U);
 	for (u32 len = 0; len < sizeof(huge); len++)
 		KUNIT_EXPECT_LT(test, parse_identity_keys(huge, len,
 				parser_identity_emit, &seen), 0);

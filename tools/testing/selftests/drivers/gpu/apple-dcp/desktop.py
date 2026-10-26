@@ -685,9 +685,9 @@ static void emit(void *data,const char *key,u32 len,u32 type,u32 size,u32 depth)
 }
 int main(void)
 {
-    assert(!parse_identity_keys(blob,sizeof(blob),emit,NULL) && seen==6);
+    assert(!parse_identity_keys(blob,sizeof(blob),emit,NULL) && seen==7);
     for(unsigned i=0;i<sizeof(blob)-4;i++) {
-        seen=0;assert(parse_identity_keys(blob,i,emit,NULL)<0);assert(seen<=6);
+        seen=0;assert(parse_identity_keys(blob,i,emit,NULL)<0);assert(seen<=7);
     }
     u32 huge[]={0xd3,(1U<<24)|0xffffff};
     assert(parse_identity_keys(huge,sizeof(huge),emit,NULL)==-E2BIG);
