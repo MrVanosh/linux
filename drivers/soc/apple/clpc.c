@@ -48,6 +48,8 @@ enum apple_clpc_rail {
 #define APPLE_CLPC_BUSY_PCT	50
 /* Time a rail keeps its last request after demand stops */
 #define APPLE_CLPC_HOLD_MS	32
+/* Time graphics stays powered without a break before it counts as GPU demand */
+#define APPLE_CLPC_GPU_SUSTAIN_MS	64
 
 /**
  * struct apple_clpc_hw - per-SoC CLPC parameters
@@ -101,6 +103,10 @@ struct apple_clpc {
 	struct dentry *debugfs;
 	struct regmap *gpu_pmgr;
 	u32 gpu_offset;
+	/* Graphics powered at the last sample, since when, and that sample's time */
+	bool gpu_on;
+	unsigned long gpu_on_since;
+	unsigned long gpu_sampled;
 };
 
 /* cpufreq policies can appear after probe; pick up new ones as they do. */
@@ -227,6 +233,36 @@ static void apple_clpc_queue(struct apple_clpc *clpc, bool idle)
 			   msecs_to_jiffies(APPLE_CLPC_SAMPLE_MS));
 }
 
+/*
+ * Whether the GPU streams work: graphics has stayed powered for
+ * APPLE_CLPC_GPU_SUSTAIN_MS, with no sample in between that found it off and
+ * no gap in sampling long enough to have missed that. The firmware powers
+ * graphics off a few milliseconds after the GPU idles, so a frame-paced load
+ * such as video playback powers it up and down with each frame and does not
+ * count. A failed read counts as powered, so that it cannot starve a running
+ * graphics consumer.
+ */
+static bool apple_clpc_gpu_streaming(struct apple_clpc *clpc, unsigned long now)
+{
+	bool gap = time_after(now, clpc->gpu_sampled +
+				   msecs_to_jiffies(2 * APPLE_CLPC_SAMPLE_MS));
+	u32 status;
+	int err;
+
+	clpc->gpu_sampled = now;
+	err = regmap_read(clpc->gpu_pmgr, clpc->gpu_offset, &status);
+	if (!err && (status & GENMASK(7, 4)) != GENMASK(7, 4)) {
+		clpc->gpu_on = false;
+		return false;
+	}
+
+	if (!clpc->gpu_on || gap)
+		clpc->gpu_on_since = now;
+	clpc->gpu_on = true;
+	return time_after_eq(now, clpc->gpu_on_since +
+				  msecs_to_jiffies(APPLE_CLPC_GPU_SUSTAIN_MS));
+}
+
 static void apple_clpc_sample(struct apple_clpc *clpc)
 {
 	unsigned int demand[APPLE_CLPC_RAILS] = {};
@@ -248,17 +284,9 @@ static void apple_clpc_sample(struct apple_clpc *clpc)
 		for (rail = 0; rail < APPLE_CLPC_RAILS; rail++)
 			demand[rail] = max(demand[rail], cl->request[rail]);
 	}
-	if (clpc->gpu_pmgr) {
-		u32 status;
-
-		/* Keep the qualified floor while graphics is powered. A failed
-		 * read must not silently starve a running graphics consumer.
-		 */
-		if (regmap_read(clpc->gpu_pmgr, clpc->gpu_offset, &status) ||
-		    (status & GENMASK(7, 4)) == GENMASK(7, 4))
-			for (rail = 0; rail < APPLE_CLPC_RAILS; rail++)
-				demand[rail] = clpc->hw->map[rail][APPLE_CLPC_LEVELS - 1];
-	}
+	if (clpc->gpu_pmgr && apple_clpc_gpu_streaming(clpc, now))
+		for (rail = 0; rail < APPLE_CLPC_RAILS; rail++)
+			demand[rail] = clpc->hw->map[rail][APPLE_CLPC_LEVELS - 1];
 
 	for (rail = 0; rail < APPLE_CLPC_RAILS; rail++)
 		state[rail] = apple_clpc_vote(&clpc->vote[rail], demand[rail],
@@ -268,7 +296,8 @@ static void apple_clpc_sample(struct apple_clpc *clpc)
 				   apple_clpc_floor(clpc, state)))
 		clpc->update_errors++;
 
-	apple_clpc_queue(clpc, !apple_clpc_floor(clpc, state));
+	/* Sample on time while graphics is powered, to see it power off. */
+	apple_clpc_queue(clpc, !apple_clpc_floor(clpc, state) && !clpc->gpu_on);
 }
 
 static void apple_clpc_work(struct work_struct *work)
@@ -301,6 +330,9 @@ static int apple_clpc_status_show(struct seq_file *s, void *unused)
 			   clpc->hw->map[rail][2], clpc->hw->map[rail][3]);
 	seq_printf(s, "samples: %lu update errors: %lu\n", clpc->samples,
 		   clpc->update_errors);
+	if (clpc->gpu_pmgr)
+		seq_printf(s, "gpu: powered %u for %u ms\n", clpc->gpu_on,
+			   clpc->gpu_on ? jiffies_to_msecs(jiffies - clpc->gpu_on_since) : 0);
 	for (i = 0; i < clpc->nr_clusters; i++)
 		seq_printf(s, "cluster cpu%u: busy %u%% level %u%% -> dcs %u soc %u\n",
 			   clpc->clusters[i].policy_cpu, clpc->clusters[i].busy,
@@ -483,9 +515,12 @@ static const struct apple_clpc_hw apple_clpc_hw_t8132 = {
  * and completes every command over the fabric. With the fabric left at
  * state 0, light GPU submissions take 30-50% longer than at state 3, and
  * macOS holds the fabric at its top states while such work streams. The
- * graphics power state is on only while the GPU has work (the firmware
- * powers it off when idle), so the floor follows GPU activity and is
- * released HOLD_MS after it stops.
+ * firmware powers graphics off a few milliseconds after the GPU idles, so
+ * graphics that stays powered for GPU_SUSTAIN_MS marks such a stream. Loads
+ * paced by frames power it up and down with each frame instead: on J700,
+ * 1080p video playback and light browsing keep it powered for at most 63 ms
+ * at a time, and leave the floor down. The floor is released HOLD_MS after
+ * graphics powers off.
  */
 static const struct apple_clpc_hw apple_clpc_hw_t8140 = {
 	.rail = { [APPLE_CLPC_DCS] = 0, [APPLE_CLPC_SOC] = 1 },
