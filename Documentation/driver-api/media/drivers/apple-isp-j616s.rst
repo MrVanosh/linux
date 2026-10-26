@@ -1,7 +1,7 @@
 .. SPDX-License-Identifier: GPL-2.0-only
 
 J616s ISP modes and capture protocol
-==================================
+====================================
 
 Sources and scope
 -----------------
@@ -122,32 +122,32 @@ Command stream
 IO commands have a zero/status u32 followed by the opcode u32, then the
 parameters below. Sizes include that eight-byte header. ``ch`` is zero.
 
-================ =================================== ==== ===================
-Opcode           Command                             Size Parameters
-================ =================================== ==== ===================
-0x0003           CONFIG_GET                          0x1c Camera channel count
-0x3206           SET_DSID_CLR_MULTI_BC_REG_BASE       0x50 8 slots, range 0x2fc
-0x0000           START                               0x0c Proxy 0x11, Linux 0
-0x010d           CH_INFO_GET                         0x190 ch
-0x0106           CH_CAMERA_CONFIG_GET                0x120 ch, index (all)
-0x0024           FLICKER_SENSOR_SET                  0x0c 0
-0x013b           CH_SBS_ENABLE                       0x10 ch, 1
-0x0107           CH_CAMERA_CONFIG_SELECT             0x10 ch, selected config
-0x010e           CH_BUFFER_RECYCLE_MODE_SET          0x10 ch, 1 (empty only)
-0x010f           CH_BUFFER_RECYCLE_START             0x0c ch
-0x080c           CH_CROP_SCL1_SET                    0x1c ch, x, y, width, height
-0x0b09           CH_OUTPUT_CONFIG_SCL1_SET           0x38 ch, output geometry
-0x0208           CH_AE_FRAME_RATE_MAX_SET            0x10 ch, fps * 256
-0x020a           CH_AE_FRAME_RATE_MIN_SET            0x10 ch, min_fps * 256
-0x0117           CH_BUFFER_POOL_CONFIG_SET (meta)    0x9c ch, pool 0, count 8
-0x0117           CH_BUFFER_POOL_CONFIG_SET (output)  0x9c ch, pool 9, count 2
-0x0125           CH_LOCAL_RAW_BUFFER_ENABLE          0x10 ch, 1
-0x0b0d           CH_PREVIEW_STREAM_SET               0x10 ch, 1
-0x0138           CH_MASTER_SLAVE_SYNC_MODE_SET       0x10 ch, 0
-0x0100           CH_START                            0x0c ch
-0x0101           CH_STOP                             0x0c ch
-0x0104           CH_BUFFER_RETURN                    0x0c ch
-================ =================================== ==== ===================
+======  ==================================  =====  =======================
+Opcode  Command                             Size   Parameters
+======  ==================================  =====  =======================
+0x0003  CONFIG_GET                          0x1c   Camera channel count
+0x3206  SET_DSID_CLR_MULTI_BC_REG_BASE      0x50   8 slots, range 0x2fc
+0x0000  START                               0x0c   Proxy 0x11, Linux 0
+0x010d  CH_INFO_GET                         0x190  ch
+0x0106  CH_CAMERA_CONFIG_GET                0x120  ch, index (all)
+0x0024  FLICKER_SENSOR_SET                  0x0c   0
+0x013b  CH_SBS_ENABLE                       0x10   ch, 1
+0x0107  CH_CAMERA_CONFIG_SELECT             0x10   ch, selected config
+0x010e  CH_BUFFER_RECYCLE_MODE_SET          0x10   ch, 1 (empty only)
+0x010f  CH_BUFFER_RECYCLE_START             0x0c   ch
+0x080c  CH_CROP_SCL1_SET                    0x1c   ch, x, y, width, height
+0x0b09  CH_OUTPUT_CONFIG_SCL1_SET           0x38   ch, output geometry
+0x0208  CH_AE_FRAME_RATE_MAX_SET            0x10   ch, fps * 256
+0x020a  CH_AE_FRAME_RATE_MIN_SET            0x10   ch, min_fps * 256
+0x0117  CH_BUFFER_POOL_CONFIG_SET (meta)    0x9c   ch, pool 0, count 8
+0x0117  CH_BUFFER_POOL_CONFIG_SET (output)  0x9c   ch, pool 9, count 2
+0x0125  CH_LOCAL_RAW_BUFFER_ENABLE          0x10   ch, 1
+0x0b0d  CH_PREVIEW_STREAM_SET               0x10   ch, 1
+0x0138  CH_MASTER_SLAVE_SYNC_MODE_SET       0x10   ch, 0
+0x0100  CH_START                            0x0c   ch
+0x0101  CH_STOP                             0x0c   ch
+0x0104  CH_BUFFER_RETURN                    0x0c   ch
+======  ==================================  =====  =======================
 
 The DSID bases are 0x2201d4000, 0x2221d4000, 0x2241d4000, 0x2261d4000,
 then four U64_MAX sentinels. Linux retains its existing boot-time PMP and
@@ -205,7 +205,9 @@ is source-level ABI evidence, not a new live qualification of P010.
   selecting P010 would violate the proxy's guarded startup lifecycle. The new config query explicitly exchanges 0x120,
   rather than the unused legacy 0xdc current-config helper. Header/channel/
   index checks and duplicated geometry checks guard decoding. The H17
-  appended bytes remain uninterpreted.
+  appended bytes remain uninterpreted. The old preview validator also checks
+  CH_INFO_GET byte 0x138; the current Linux helper retains only the common
+  0x118-byte prefix of its 0x190-byte reply and does not make that check.
 * Metadata: CH_INFO_GET reports 0x4d00 on both paths. The proxy rounds its
   metadata backing/pool to 0x8000; P010 does the same even on a 4 KiB host.
   NV12 retains the current driver's 0x4d00 pool and 16-buffer capacity.
