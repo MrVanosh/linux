@@ -75,7 +75,7 @@ these files without additional runtime replies or capture evidence. In particula
 the old 0x103 SIF example must not be treated as an IMX958 Bayer-format declaration.
 
 AOP endpoints and separate audio stream
---------------------------------------
+-----------------------------------------
 
 The modern ``fw/aop/client.py`` map in PR 20 is 0x20 SPUApp, 0x21 wakehint,
 0x22 audio, 0x23 voice trigger, 0x24 accelerometer, 0x25 gyroscope, 0x26 lid
