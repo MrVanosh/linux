@@ -1709,6 +1709,9 @@ static int __attribute__((unused)) drm_color_lut_size(const void *blob)
 { (void)blob; assert(!"gamma LUT without a colour-management change"); return 0; }
 static unsigned int __attribute__((unused)) dcp_gamma_lut_size(struct platform_device *p)
 { (void)p; assert(!"gamma LUT without a colour-management change"); return 0; }
+/* Desktop admission is covered by panel-adaptive-fallback. */
+static int dcp_desktop_vrr_check(struct apple_dcp *d, struct drm_crtc_state *s)
+{ (void)d; (void)s; return 0; }
 /* Route-follow is for Type-C displays; this DCP has no Type-C routes. */
 static bool __attribute__((unused)) typec_follow_crtc = true;
 static int __attribute__((unused)) dcp_typec_follow_check(struct apple_dcp *d, struct drm_crtc *c,
@@ -1841,13 +1844,17 @@ typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
+#define READ_ONCE(x) (x)
+#define WRITE_ONCE(x,v) ((x)=(v))
 #define DCP_FIRMWARE_H17P 1
+#define DCP_FIRMWARE_V_26_6_DESKTOP 5
 #define DCP_IOMFB_METHODS_H17P_EXTERNAL 2
 #define DCP_IOMFB_METHODS_H17G 3
 #define DCP_MAX_CALL_DEPTH 8
 #define IOMFB_MAX_CB 600
 #define DCP_PACKET_ALIGNMENT 64
 #define ALIGN(n, a) (((n) + (a) - 1) & ~((a) - 1))
+#define dcp_trace_panel_setter(...) ((void)0)
 #define dev_err(...) ((void)dev)
 #define dev_info(...) ((void)dev)
 #define dev_warn(...) ((void)dev)
@@ -1864,6 +1871,7 @@ struct apple_dcp {
     bool (**cb_handlers)(struct apple_dcp *, int, void *, void *);
     unsigned long unknown_callbacks[16];
     int start_done;
+    struct {bool modeset_active,modeset_callback_error;} *desktop;
     struct dcp_channel channel;
 };
 static bool machine;
@@ -1923,4 +1931,6 @@ int main(void)
 }
 """
 
-    return prefix + source[start:end] + suffix
+    desktop = (root / "drivers/gpu/drm/apple/iomfb_v26_6_desktop.c").read_text()
+    checker = block(desktop, 'bool iomfb_check_callback_v26_6_desktop(')
+    return prefix + checker + source[start:end] + suffix

@@ -3,6 +3,7 @@
 #include <linux/slab.h>
 #include <linux/platform_device.h>
 #include <drm/drm_kunit_helpers.h>
+#include <drm/drm_edid.h>
 #include <drm/drm_atomic_state_helper.h>
 
 #include "dcp.h"
@@ -13,6 +14,7 @@
 #include "dcp-property.h"
 #include "iomfb_internal.h"
 #include "parser.h"
+#include "dcp-panel-adt.h"
 
 static struct device parser_device = {
 	.init_name = "apple-display-parser-test",
@@ -21,6 +23,13 @@ static struct device parser_device = {
 static struct apple_dcp parser_dcp = {
 	.dev = &parser_device,
 };
+
+/* The probe owns the metadata lock beside the mode catalogue. */
+static void parser_modes_init(struct apple_dcp *dcp)
+{
+	dcp_modes_init(dcp);
+	spin_lock_init(&dcp->metadata.lock);
+}
 
 struct parser_blob {
 	u8 data[8192];
@@ -34,6 +43,7 @@ struct parser_record {
 	s64 first_format;
 	bool bad_score_type;
 	bool vrr;
+	bool vrr_zero;
 };
 
 enum parser_missing {
@@ -143,8 +153,8 @@ static void blob_record(struct parser_blob *blob, const struct parser_record *re
 			   record->second_color_missing, DCP_COLOR_FORMAT_RGB);
 	}
 	if (record->vrr) {
-		blob_int(blob, "MinimumVariableRefreshRate", 48 << 16);
-		blob_int(blob, "MaximumVariableRefreshRate", 120 << 16);
+		blob_int(blob, "MinimumVariableRefreshRate", record->vrr_zero ? 0 : 48 << 16);
+		blob_int(blob, "MaximumVariableRefreshRate", record->vrr_zero ? 0 : 120 << 16);
 	}
 }
 
@@ -435,6 +445,58 @@ static void parser_notch_vrr(struct kunit *test)
 	kfree(modes);
 }
 
+static void parser_vrr_empty_range(struct kunit *test)
+{
+	struct parser_record record = valid_record(7, 10);
+	struct dcp_display_mode *modes;
+	struct parser_blob *blob;
+	unsigned int count, desktop;
+	struct dcp_parse_ctx ctx;
+
+	/* Desktop firmware can publish both fields as zero placeholders. */
+	record.rate = 120 << 16;
+	record.vrr = true;
+	record.vrr_zero = true;
+	blob = make_blob(test, &record, 1);
+	KUNIT_ASSERT_NOT_NULL(test, blob);
+	modes = parse_blob(blob, &count, 0, true);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, modes);
+	KUNIT_ASSERT_EQ(test, count, 1U);
+	KUNIT_EXPECT_FALSE(test, modes[0].vrr);
+	KUNIT_EXPECT_EQ(test, modes[0].min_vrr, 0U);
+	KUNIT_EXPECT_EQ(test, modes[0].max_vrr, 0U);
+	kfree(modes);
+
+	/* A display without the internal ProMotion policy stays fixed. */
+	modes = parse_blob(blob, &count, 0, false);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, modes);
+	KUNIT_ASSERT_EQ(test, count, 1U);
+	KUNIT_EXPECT_FALSE(test, modes[0].vrr);
+	KUNIT_EXPECT_EQ(test, modes[0].min_vrr, 0U);
+	KUNIT_EXPECT_EQ(test, modes[0].max_vrr, 0U);
+	kfree(modes);
+	/* The catalog owner enables this convention only for desktop firmware. */
+	for (desktop = 0; desktop < 2; desktop++) {
+		struct apple_dcp *dcp = kunit_kzalloc(test, sizeof(*dcp), GFP_KERNEL);
+		u64 generation;
+
+		KUNIT_ASSERT_NOT_NULL(test, dcp);
+		parser_modes_init(dcp);
+		dcp->fw_compat = desktop ? DCP_FIRMWARE_V_26_6_DESKTOP :
+			DCP_FIRMWARE_V_13_5;
+		dcp->fixed_connector_type = DRM_MODE_CONNECTOR_eDP;
+		KUNIT_ASSERT_EQ(test, parse(blob->data, blob->size, &ctx), 0);
+		ctx.dcp = &parser_dcp;
+		generation = dcp_modes_transfer_begin(dcp);
+		KUNIT_ASSERT_EQ(test, dcp_modes_replace(dcp, &ctx, generation), 0);
+		KUNIT_ASSERT_EQ(test, dcp->nr_modes, 1U);
+		KUNIT_EXPECT_EQ(test, dcp->modes[0].vrr, !!desktop);
+		KUNIT_EXPECT_EQ(test, dcp->modes[0].min_vrr, desktop ? 24U << 16 : 0U);
+		KUNIT_EXPECT_EQ(test, dcp->modes[0].max_vrr, desktop ? 120U << 16 : 0U);
+		kfree(dcp->modes);
+	}
+}
+
 static void parser_replacement(struct kunit *test)
 {
 	struct parser_record record = valid_record(7, 10);
@@ -445,7 +507,7 @@ static void parser_replacement(struct kunit *test)
 	struct drm_display_mode requested;
 
 	KUNIT_ASSERT_NOT_NULL(test, dcp);
-	dcp_modes_init(dcp);
+	parser_modes_init(dcp);
 	blob = make_blob(test, &record, 1);
 	KUNIT_ASSERT_NOT_NULL(test, blob);
 	KUNIT_ASSERT_EQ(test, parse(blob->data, blob->size, &ctx), 0);
@@ -493,8 +555,7 @@ static void parser_held_keeps_edid(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, dcp);
 	KUNIT_ASSERT_NOT_NULL(test, connector);
 	KUNIT_ASSERT_NOT_NULL(test, pipeline);
-	dcp_modes_init(dcp);
-	spin_lock_init(&dcp->metadata.lock);
+	parser_modes_init(dcp);
 	apple_connector_edid_init(connector);
 	apple_connector_set_pipeline(connector, pipeline);
 	dcp->connector = connector;
@@ -528,7 +589,7 @@ static void parser_attachment_admission(struct kunit *test)
 	struct drm_display_mode requested;
 
 	KUNIT_ASSERT_NOT_NULL(test, dcp);
-	dcp_modes_init(dcp);
+	parser_modes_init(dcp);
 	spin_lock_init(&dcp->mode_state.lock);
 	blob = make_blob(test, &record, 1);
 	KUNIT_ASSERT_NOT_NULL(test, blob);
@@ -575,7 +636,7 @@ static void parser_stale_transfer(struct kunit *test)
 	u64 old_generation, current_generation;
 
 	KUNIT_ASSERT_NOT_NULL(test, dcp);
-	dcp_modes_init(dcp);
+	parser_modes_init(dcp);
 	blob = make_blob(test, &record, 1);
 	KUNIT_ASSERT_NOT_NULL(test, blob);
 	KUNIT_ASSERT_EQ(test, parse(blob->data, blob->size, &ctx), 0);
@@ -649,7 +710,7 @@ static void parser_route_catalog_handoff(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, connector);
 	KUNIT_ASSERT_NOT_NULL(test, other);
 	KUNIT_ASSERT_NOT_NULL(test, pipeline);
-	dcp_modes_init(dcp);
+	parser_modes_init(dcp);
 	dcp->dev = &pipeline->dev;
 	connector->dcp = pipeline;
 	observer->dcp = dcp;
@@ -770,7 +831,7 @@ static void parser_route_programming_guard(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, connector->base.state);
 	connector->base.state->crtc = &crtc->base;
 	crtc_state.connector_mask = drm_connector_mask(&connector->base);
-	dcp_modes_init(dcp);
+	parser_modes_init(dcp);
 	dcp->modes_admitted = true;
 	dcp->fw_compat = DCP_FIRMWARE_V_13_5;
 	dcp->nr_typec_routes = 1;
@@ -856,7 +917,7 @@ static void parser_route_invalid_own_mode(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, dcp);
 	KUNIT_ASSERT_NOT_NULL(test, crtc);
 	KUNIT_ASSERT_NOT_NULL(test, pdev);
-	dcp_modes_init(dcp);
+	parser_modes_init(dcp);
 	dcp->fw_compat = DCP_FIRMWARE_V_13_5;
 	dcp->nr_typec_routes = 1;
 	crtc->dcp = pdev;
@@ -875,7 +936,7 @@ static void parser_connector_ownership(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, dcp);
 	KUNIT_ASSERT_NOT_NULL(test, fixed);
 	KUNIT_ASSERT_NOT_NULL(test, borrowed);
-	dcp_modes_init(dcp);
+	parser_modes_init(dcp);
 	mutex_lock(&dcp->modes_lock);
 	dcp->connector = borrowed;
 	dcp->modes_admitted = true;
@@ -903,7 +964,7 @@ static void parser_route_retirement(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, fixed);
 	KUNIT_ASSERT_NOT_NULL(test, route);
 	KUNIT_ASSERT_NOT_NULL(test, other);
-	dcp_modes_init(dcp);
+	parser_modes_init(dcp);
 	dcp->connector = fixed;
 	dcp->active_typec_route = route;
 	dcp->modes_admitted = true;
@@ -927,7 +988,7 @@ static void parser_rejected_replacement(struct kunit *test)
 	struct parser_blob *blob;
 
 	KUNIT_ASSERT_NOT_NULL(test, dcp);
-	dcp_modes_init(dcp);
+	parser_modes_init(dcp);
 	blob = make_blob(test, &record, 1);
 	KUNIT_ASSERT_NOT_NULL(test, blob);
 	KUNIT_ASSERT_EQ(test, parse(blob->data, blob->size, &ctx), 0);
@@ -969,7 +1030,7 @@ static void parser_attribute_epoch(struct kunit *test)
 
 	KUNIT_ASSERT_NOT_NULL(test, dcp);
 	KUNIT_ASSERT_NOT_NULL(test, blob);
-	dcp_modes_init(dcp);
+	parser_modes_init(dcp);
 	put_unaligned_le32(0xd3, blob->data);
 	blob->size = 4;
 	blob_tag(blob, 1, 3);
@@ -1003,7 +1064,7 @@ static void parser_attributes_malformed(struct kunit *test)
 
 	KUNIT_ASSERT_NOT_NULL(test, dcp);
 	KUNIT_ASSERT_NOT_NULL(test, blob);
-	dcp_modes_init(dcp);
+	parser_modes_init(dcp);
 	dcp->width_mm = 520;
 	dcp->height_mm = 290;
 	dcp->ext_backlight = true;
@@ -1040,7 +1101,7 @@ static void parser_optional_flag_extent(struct kunit *test)
 
 	KUNIT_ASSERT_NOT_NULL(test, dcp);
 	KUNIT_ASSERT_NOT_NULL(test, blob);
-	dcp_modes_init(dcp);
+	parser_modes_init(dcp);
 	put_unaligned_le32(0xd3, blob->data);
 	blob->size = 4;
 	blob_tag(blob, 1, 3);
@@ -1089,11 +1150,12 @@ static void parser_attribute_deferred(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, connector);
 	KUNIT_ASSERT_NOT_NULL(test, dev);
 	KUNIT_ASSERT_NOT_NULL(test, blob);
-	dcp_modes_init(dcp);
+	parser_modes_init(dcp);
 	observer->dcp = dcp;
 	INIT_WORK(&connector->hotplug_wq, parser_catalog_ready);
 	mutex_init(&dev->mode_config.mutex);
 	connector->base.dev = dev;
+	apple_connector_backlight_init(connector);
 	dcp->connector = connector;
 	dcp->panel.width_mm = 600;
 	dcp->modes = kmalloc_obj(*dcp->modes);
@@ -1118,6 +1180,9 @@ static void parser_attribute_deferred(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, connector->base.display_info.width_mm, 520U);
 	KUNIT_EXPECT_EQ(test, connector->base.display_info.height_mm, 290U);
 	dcp_modes_release(dcp);
+	cancel_work_sync(&connector->hotplug_wq);
+	cancel_work_sync(&connector->bl_sync_wq);
+	apple_connector_backlight_early_unregister(connector);
 }
 
 static void parser_dimensions_lifetime(struct kunit *test)
@@ -1129,7 +1194,7 @@ static void parser_dimensions_lifetime(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, dcp);
 	KUNIT_ASSERT_NOT_NULL(test, connector);
 	KUNIT_ASSERT_NOT_NULL(test, dev);
-	dcp_modes_init(dcp);
+	parser_modes_init(dcp);
 	mutex_init(&dev->mode_config.mutex);
 	connector->base.dev = dev;
 	dcp->connector = connector;
@@ -1158,7 +1223,7 @@ static void parser_catalog_release(struct kunit *test)
 	struct apple_dcp *dcp = kunit_kzalloc(test, sizeof(*dcp), GFP_KERNEL);
 
 	KUNIT_ASSERT_NOT_NULL(test, dcp);
-	dcp_modes_init(dcp);
+	parser_modes_init(dcp);
 	dcp->modes = kmalloc_obj(*dcp->modes);
 	KUNIT_ASSERT_NOT_NULL(test, dcp->modes);
 	dcp->nr_modes = 1;
@@ -1238,12 +1303,135 @@ static void parser_route_prepare_scope(struct kunit *test)
 	dcp->typec_follow_start = true;
 	dcp->typec_follow_gen = dcp->typec_generation;
 	mutex_init(&dcp->hpd_mutex);
+	mutex_init(&dcp->tb_lock);
 	KUNIT_EXPECT_EQ(test, dcp_typec_prepare_route(dcp), -ENODEV);
+	mutex_destroy(&dcp->tb_lock);
 	mutex_destroy(&dcp->hpd_mutex);
 	mutex_destroy(&dcp->modes_lock);
 }
 
+static void parser_panel_identity(struct kunit *test)
+{
+	struct parser_blob *blob = kunit_kzalloc(test, sizeof(*blob), GFP_KERNEL);
+	struct dcp_display_metadata metadata;
+	struct dcp_parse_ctx ctx;
+	const struct drm_edid *edid;
+	const struct edid *raw;
+	struct dcp_display_mode modes[2] = {};
+
+	modes[0].mode = (struct drm_display_mode) {
+		.clock = 540005, .hdisplay = 3456, .hsync_start = 3500,
+		.hsync_end = 3550, .htotal = 4000, .vdisplay = 2160,
+		.vsync_start = 2165, .vsync_end = 2170, .vtotal = 2250,
+		.flags = DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC,
+	};
+	modes[1] = modes[0];
+	modes[1].mode.clock = 1080005;
+	modes[1].vrr = true;
+	modes[1].min_vrr = 24U << 16;
+	modes[1].max_vrr = 120U << 16;
+
+	KUNIT_ASSERT_NOT_NULL(test, blob);
+	put_unaligned_le32(0xd3, blob->data);
+	blob->size = 4;
+	blob_tag(blob, 1, 1);
+	blob_key(blob, "ProductAttributes");
+	blob_tag(blob, 1, 4);
+	blob_key(blob, "ManufacturerID");
+	blob_key(blob, "TST");
+	blob_key(blob, "ProductName");
+	blob_key(blob, "Synthetic Internal Panel");
+	blob_int(blob, "ProductID", 42);
+	blob_int(blob, "SerialNumber", 0x12345678);
+	KUNIT_ASSERT_EQ(test, parse(blob->data, blob->size, &ctx), 0);
+	KUNIT_ASSERT_EQ(test, parse_panel_metadata(&ctx, &metadata), 0);
+	KUNIT_EXPECT_STREQ(test, metadata.name, "Synthetic Int");
+	edid = dcp_panel_edid(&metadata, modes, ARRAY_SIZE(modes), 345, 223);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(edid));
+	KUNIT_EXPECT_TRUE(test, drm_edid_valid(edid));
+	raw = drm_edid_raw(edid);
+	KUNIT_EXPECT_EQ(test, le16_to_cpu(raw->product_id.product_code), 42);
+	KUNIT_EXPECT_EQ(test, le32_to_cpu(raw->product_id.serial_number), 0x12345678U);
+	KUNIT_EXPECT_EQ(test, raw->gamma, 0xff);
+	KUNIT_EXPECT_EQ(test, le16_to_cpu(raw->detailed_timings[0].pixel_clock), 54001);
+	KUNIT_EXPECT_EQ(test, raw->detailed_timings[3].data.other_data.data.range.min_vfreq, 24);
+	KUNIT_EXPECT_EQ(test, raw->detailed_timings[3].data.other_data.data.range.max_vfreq, 120);
+	KUNIT_EXPECT_EQ(test, modes[0].mode.clock, 540005);
+	drm_edid_free(edid);
+}
+
+static void parser_panel_identity_stable(struct kunit *test)
+{
+	struct apple_dcp *dcp = kunit_kzalloc(test, sizeof(*dcp), GFP_KERNEL);
+	struct dcp_desktop_state *desktop = kunit_kzalloc(test, sizeof(*desktop), GFP_KERNEL);
+	struct dcp_display_metadata metadata = {
+		.manufacturer = "TST", .name = "Synthetic", .product = 42, .serial = 1,
+	};
+	u64 generation;
+
+	KUNIT_ASSERT_NOT_NULL(test, dcp);
+	KUNIT_ASSERT_NOT_NULL(test, desktop);
+	dcp->desktop = desktop;
+	dcp->fw_compat = DCP_FIRMWARE_V_26_6_DESKTOP;
+	dcp->panel.width_mm = 345;
+	spin_lock_init(&dcp->metadata.lock);
+	dcp_panel_metadata_replace(dcp, &metadata);
+	generation = desktop->panel_metadata_generation;
+	KUNIT_EXPECT_TRUE(test, dcp_panel_metadata_current(dcp, generation));
+	dcp_panel_metadata_replace(dcp, NULL);
+	dcp_panel_metadata_replace(dcp, &metadata);
+	{
+		struct dcp_display_metadata partial = { .manufacturer = "TST", .product = 42 };
+
+		dcp_panel_metadata_replace(dcp, &partial);
+	}
+	KUNIT_EXPECT_TRUE(test, dcp_panel_metadata_current(dcp, generation));
+	KUNIT_EXPECT_EQ(test, desktop->panel_metadata.serial, 1U);
+	metadata.serial++;
+	dcp_panel_metadata_replace(dcp, &metadata);
+	KUNIT_EXPECT_FALSE(test, dcp_panel_metadata_current(dcp, generation));
+	KUNIT_EXPECT_EQ(test, desktop->panel_metadata.serial, 2U);
+}
+
+static void parser_identity_emit(void *data, const char *key, u32 len,
+				 u32 type, u32 size, u32 depth)
+{
+	u32 *seen = data;
+
+	(*seen)++;
+}
+
+static void parser_identity_bounds(struct kunit *test)
+{
+	u32 seen = 0;
+	__le32 huge[] = { cpu_to_le32(0xd3), cpu_to_le32(0x01ffffff) };
+	int ret;
+
+	ret = parse_identity_keys(huge, sizeof(huge), parser_identity_emit, &seen);
+	KUNIT_EXPECT_EQ(test, ret, -E2BIG);
+	KUNIT_EXPECT_EQ(test, seen, 1U);
+	for (u32 len = 0; len < sizeof(huge); len++) {
+		ret = parse_identity_keys(huge, len, parser_identity_emit, &seen);
+		KUNIT_EXPECT_LT(test, ret, 0);
+	}
+}
+
+static void parser_adt_bounds(struct kunit *test)
+{
+	struct dcp_panel_adt panel = { .identity = { .manufacturer = "APP" } };
+	struct dcp_panel_adt before = panel;
+	__le32 huge[] = { cpu_to_le32(4097), 0 };
+
+	KUNIT_EXPECT_EQ(test, dcp_panel_adt_parse(huge, sizeof(huge), &panel), -E2BIG);
+	KUNIT_EXPECT_MEMEQ(test, &panel, &before, sizeof(panel));
+	KUNIT_EXPECT_EQ(test, dcp_panel_adt_parse(NULL, 0, &panel), -EINVAL);
+}
+
 static struct kunit_case parser_cases[] = {
+	KUNIT_CASE(parser_adt_bounds),
+	KUNIT_CASE(parser_identity_bounds),
+	KUNIT_CASE(parser_panel_identity_stable),
+	KUNIT_CASE(parser_panel_identity),
 	KUNIT_CASE(parser_score_presence),
 	KUNIT_CASE(parser_legacy_ties),
 	KUNIT_CASE(parser_color_presence),
@@ -1252,6 +1440,7 @@ static struct kunit_case parser_cases[] = {
 	KUNIT_CASE(parser_horizontal_rate),
 	KUNIT_CASE(parser_bad_score),
 	KUNIT_CASE(parser_notch_vrr),
+	KUNIT_CASE(parser_vrr_empty_range),
 	KUNIT_CASE(parser_replacement),
 	KUNIT_CASE(parser_held_keeps_edid),
 	KUNIT_CASE(parser_attachment_admission),

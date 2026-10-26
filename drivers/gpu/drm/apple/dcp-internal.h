@@ -5,6 +5,7 @@
 #define __APPLE_DCP_INTERNAL_H__
 
 #include <drm/drm_mode.h>
+#include <linux/atomic.h>
 #include <linux/backlight.h>
 #include <linux/device.h>
 #include <linux/ioport.h>
@@ -185,6 +186,8 @@ struct dcp_panel {
 	int height_mm;
 	/// panel has a mini-LED backlight
 	bool has_mini_led;
+	/* The DT panel compatible identifies an adaptive-sync capable panel. */
+	bool has_vrr;
 };
 
 enum dcp_iomfb_method_profile {
@@ -228,6 +231,11 @@ enum dcp_test_point {
  * for such a DCP only.
  */
 struct dcp_desktop_state {
+	/* Protected by backlight.lock, independent of framebuffer retirement. */
+	struct dcp_backlight_swap backlight;
+	bool inherited_brightness_valid;
+	u32 inherited_brightness;
+
 	/* Queued swap; too large for the shared swap union. */
 	struct dcp_swap_submit_req_v26_6_desktop swap;
 	/* Opaque client identity the firmware's IOMFB calls carry. */
@@ -238,6 +246,22 @@ struct dcp_desktop_state {
 	 * element before the real one is selected.
 	 */
 	bool mode_live;
+	/* Identity supplied by this fixed panel, independent of optional color data. */
+	struct dcp_display_metadata panel_metadata;
+	struct dcp_display_metadata panel_adt_identity;
+	u64 panel_metadata_generation;
+	bool panel_metadata_valid;
+	atomic_t identity_log_count[4];
+	u8 panel_raw_edid[4096];
+	size_t panel_raw_edid_size;
+	/* RX records an unsupported callback until the modeset RPC has drained. */
+	bool modeset_active;
+	bool modeset_callback_error;
+	/* An opt-in adaptive-sync failure stays fixed until the next boot. */
+	bool vrr_failed;
+	bool vrr_requested;
+	u32 present_id;
+	bool present_pending;
 	/*
 	 * GAMMA_LUT: the firmware's own table, read before the first change;
 	 * the table being sent; the LUT it is composed from, if any.
@@ -286,6 +310,16 @@ struct dcp_desktop_state {
 /* TODO: move IOMFB members to its own struct */
 struct dcpext_scanout;
 struct dcp_hdmi;
+
+bool dcp_desktop_present_complete(struct apple_dcp *dcp, u32 id);
+void dcp_panel_metadata_replace(struct apple_dcp *dcp,
+				const struct dcp_display_metadata *metadata);
+const struct drm_edid *dcp_panel_edid_snapshot(struct apple_dcp *dcp,
+					       const struct dcp_display_mode *modes,
+					       unsigned int count, u64 *generation);
+bool dcp_panel_metadata_current(struct apple_dcp *dcp, u64 generation);
+bool dcp_desktop_vrr_supported(struct apple_dcp *dcp);
+int dcp_desktop_vrr_check(struct apple_dcp *dcp, struct drm_crtc_state *state);
 
 struct apple_dcp {
 	/* Generation-specific wire/transaction state, sharing the common KMS owner. */
@@ -669,6 +703,8 @@ struct apple_dcp {
 		void (*kick)(struct apple_dcp *dcp);
 		/* Steps a running fade; fade_start is its start in jiffies. */
 		struct delayed_work fade_work;
+		struct work_struct notify_work;
+		struct delayed_work retry_work;
 		unsigned long fade_start;
 		/* Rate limit for firmware re-send requests. */
 		unsigned long resent_at;
@@ -863,5 +899,10 @@ static inline bool dcp_ext_dptx_607(const struct apple_dcp *dcp)
 }
 
 #define DCP_AUDIO_MAX_CHANS 15
+
+void dcp_trace_panel_property(struct apple_dcp *dcp, int tag, const char *key,
+			      size_t key_len, const void *blob, size_t len);
+
+void dcp_panel_edid_receive(struct apple_dcp *dcp, const void *blob, size_t len);
 
 #endif /* __APPLE_DCP_INTERNAL_H__ */

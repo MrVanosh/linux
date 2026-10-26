@@ -32,6 +32,7 @@
 #include "iomfb.h"
 #include "iomfb_internal.h"
 #include "parser.h"
+#include "dcp-refresh.h"
 #include "dcp-property.h"
 #include "trace.h"
 #include "version_utils.h"
@@ -458,6 +459,12 @@ static void dcpep_cb_swap_complete(struct apple_dcp *dcp,
 	}
 	if (dcp->hw.iomfb_method_profile != DCP_IOMFB_METHODS_H17G)
 		retire = iomfb_present_complete_h17p(dcp);
+#endif
+#if DCP_FW_DESKTOP_26(DCP_FW_VER)
+	/* Late or duplicate completions cannot retire the replacement's flip. */
+	if (!dcp_desktop_present_complete(dcp, resp->swap_id))
+		return;
+	dcp_backlight_desktop_finish(dcp, resp->swap_id, false, true);
 #endif
 	trace_iomfb_swap_complete(dcp, resp->swap_id);
 	dcp->last_swap_id = resp->swap_id;
@@ -1134,7 +1141,11 @@ dcpep_cb_read_edt_data(struct apple_dcp *dcp, struct dcp_read_edt_data_req *req)
 static void iomfbep_cb_enable_backlight_message_ap_gated(struct apple_dcp *dcp,
 							 u8 *enabled)
 {
-#if DCP_FW_H17(DCP_FW_VER)
+#if DCP_FW_DESKTOP_26(DCP_FW_VER)
+	if (dcp_has_panel(dcp) && dcp_backlight_resend(dcp))
+		schedule_work(&dcp->bl_update_wq);
+	return;
+#elif DCP_FW_H17(DCP_FW_VER)
 	/* H17P carries the level only in presents; ask for one more. */
 	if (dcp->hw.iomfb_method_profile != DCP_IOMFB_METHODS_H17G) {
 		if (dcp_has_panel(dcp) && dcp_backlight_active(dcp) &&
@@ -1253,6 +1264,15 @@ static bool dcpep_process_chunks(struct apple_dcp *dcp,
 			dcp_property_complete(dcp->chunks.data, dcp->chunks.received,
 					      dcp->chunks.length);
 
+	dcp_trace_panel_property(dcp, 0, req->key,
+				 strnlen(req->key, sizeof(req->key)),
+				 dcp->chunks.data, dcp->chunks.length);
+
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP)
+		dcp_panel_edid_receive(dcp, dcp->chunks.data, dcp->chunks.length);
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP &&
+	    (!strcmp(req->key, "EDID") || !strcmp(req->key, "edid")))
+		return true;
 	ret = parse(dcp->chunks.data, dcp->chunks.length, &ctx);
 
 	if (ret) {
@@ -1309,6 +1329,12 @@ static bool dcpep_process_chunks(struct apple_dcp *dcp,
 
 			ret = parse_display_metadata(&metadata_ctx, &metadata);
 			dcp_firmware_metadata_attributes(dcp, ret ? NULL : &metadata);
+		} else if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP &&
+			   dcp_has_panel(dcp)) {
+			struct dcp_display_metadata metadata;
+
+			ret = parse_panel_metadata(&metadata_ctx, &metadata);
+			dcp_panel_metadata_replace(dcp, ret ? NULL : &metadata);
 		}
 	}
 
@@ -1734,6 +1760,9 @@ static bool dcp_present_begin(struct apple_dcp *dcp, u32 swap_id)
 		dcp->crashed = true;
 		return false;
 	}
+#elif DCP_FW_DESKTOP_26(DCP_FW_VER)
+	WRITE_ONCE(dcp->desktop->present_id, swap_id);
+	WRITE_ONCE(dcp->desktop->present_pending, true);
 #endif
 	return true;
 }
@@ -1819,6 +1848,12 @@ static void dcp_swap_cleared(struct apple_dcp *dcp, void *data, void *cookie)
 	ret = dcp_present_submit(dcp, swap_id, !status);
 	if (ret)
 		status = ~0U;
+
+#if DCP_FW_DESKTOP_26(DCP_FW_VER)
+	if (status && swap_id == READ_ONCE(dcp->desktop->present_id))
+		WRITE_ONCE(dcp->desktop->present_pending, false);
+	dcp_backlight_desktop_finish(dcp, swap_id, true, !status);
+#endif
 
 	if (status) {
 		/* An aborted present has already been reported. */
@@ -2033,6 +2068,8 @@ void DCP_FW_NAME(iomfb_poweron)(struct apple_dcp *dcp)
 	ret = wait_for_completion_timeout(&cookie->done, msecs_to_jiffies(10000));
 #if DCP_FW_DESKTOP_26(DCP_FW_VER)
 	dcp->desktop->poweron_result = ret > 0 ? 0 : ret == 0 ? 1 : 2;
+	if (ret > 0)
+		dcp_backlight_desktop_power(dcp, true);
 #endif
 
 	if (ret == 0) {
@@ -2154,6 +2191,9 @@ void DCP_FW_NAME(iomfb_poweroff)(struct apple_dcp *dcp)
 	if (dcp->hw.iomfb_method_profile == DCP_IOMFB_METHODS_H17G)
 		dcp_prepare_clear_swap(dcp, swap);
 #else
+#if DCP_FW_DESKTOP_26(DCP_FW_VER)
+	dcp_backlight_desktop_power(dcp, false);
+#endif
 	dcp_prepare_clear_swap(dcp, swap);
 #endif
 
@@ -2566,6 +2606,12 @@ static void dcp_swapped(struct apple_dcp *dcp, void *data, void *cookie)
 	if (ret)
 		status = ~0U;
 
+#if DCP_FW_DESKTOP_26(DCP_FW_VER)
+	if (status && swap_id == READ_ONCE(dcp->desktop->present_id))
+		WRITE_ONCE(dcp->desktop->present_pending, false);
+	dcp_backlight_desktop_finish(dcp, swap_id, true, !status);
+#endif
+
 	if (status) {
 		/* An aborted present has already been reported. */
 		if (ret != -ECANCELED)
@@ -2601,6 +2647,18 @@ static void dcp_swap_started(struct apple_dcp *dcp, void *data, void *cookie)
 	if (dcp_present_retires(dcp))
 		dcp_arm_retained_framebuffers(dcp, resp->swap_id);
 
+#if DCP_FW_DESKTOP_26(DCP_FW_VER)
+	if (dcp_has_panel(dcp)) {
+		u32 nits;
+		bool have_surface = false;
+
+		for (unsigned int i = 0; i < SWAP_SURFACES; i++)
+			have_surface |= !DCP_FW_SWAP(dcp).surf_null[i];
+		if (dcp_backlight_desktop_prepare(dcp, resp->swap_id,
+						  have_surface, &nits))
+			dcp_swap_set_brightness(&DCP_FW_SWAP(dcp).swap, nits);
+	}
+#endif
 	trace_iomfb_swap_submit(dcp, resp->swap_id);
 	dcp_h17p_prepare_swap(dcp);
 	dcp_swap_submit(dcp, false, &DCP_FW_SWAP(dcp), dcp_swapped, NULL);
@@ -2808,7 +2866,20 @@ struct dcp_modeset_cookie {
 	struct dcp_set_digital_out_mode_req actual;
 	struct dcp_set_digital_out_mode_req bootstrap;
 	bool use_bootstrap;
+	bool vrr;
+	bool program_sync;
+	bool notify_vrr_failure;
+	u32 min_vrr;
 };
+
+/* Finish only after the RPC which contained the unknown callback has replied. */
+static bool dcp_modeset_callback_failed(struct apple_dcp *dcp, void *cookie)
+{
+	if (!READ_ONCE(dcp->desktop->modeset_callback_error))
+		return false;
+	complete_set_digital_out_mode(dcp, NULL, cookie);
+	return true;
+}
 
 /*
  * get_mode_info (A364) fills the firmware's mode record for a timing and
@@ -2834,17 +2905,46 @@ static void dcp_get_mode_info(struct apple_dcp *dcp,
 		 sizeof(struct dcp_get_mode_info_resp_v26_6), &req, cb, cookie);
 }
 
+static void dcp_modeset_select(struct apple_dcp *dcp, void *out, void *cookie);
+static void dcp_modeset_sync(struct apple_dcp *dcp, void *cookie);
+
+static void dcp_modeset_fixed_fallback(struct apple_dcp *dcp,
+				       struct dcp_modeset_cookie *modeset)
+{
+	dev_warn(dcp->dev, "adaptive sync failed, restoring fixed refresh\n");
+	WRITE_ONCE(dcp->desktop->vrr_failed, true);
+	modeset->vrr = false;
+	modeset->notify_vrr_failure = true;
+	dcp_modeset_sync(dcp, modeset);
+}
+
+static void dcp_modeset_actual_done(struct apple_dcp *dcp, void *data,
+				    void *cookie)
+{
+	struct dcp_modeset_cookie *modeset = cookie;
+
+	if (dcp_modeset_callback_failed(dcp, cookie))
+		return;
+	if (data && get_unaligned_le32(data) && modeset->vrr) {
+		dcp_modeset_fixed_fallback(dcp, modeset);
+		return;
+	}
+	complete_set_digital_out_mode(dcp, data, cookie);
+}
+
 static void dcp_modeset_after_actual_info(struct apple_dcp *dcp, void *data,
 					  void *cookie)
 {
 	struct dcp_modeset_cookie *modeset = cookie;
 
+	if (dcp_modeset_callback_failed(dcp, cookie))
+		return;
 	if (!data) {
 		complete_set_digital_out_mode(dcp, NULL, cookie);
 		return;
 	}
 	dcp_set_digital_out_mode(dcp, false, &modeset->actual,
-				 complete_set_digital_out_mode, cookie);
+				 dcp_modeset_actual_done, cookie);
 }
 
 static void dcp_modeset_after_bootstrap(struct apple_dcp *dcp, void *data,
@@ -2852,8 +2952,10 @@ static void dcp_modeset_after_bootstrap(struct apple_dcp *dcp, void *data,
 {
 	struct dcp_modeset_cookie *modeset = cookie;
 
+	if (dcp_modeset_callback_failed(dcp, cookie))
+		return;
 	if (!data || get_unaligned_le32(data)) {
-		complete_set_digital_out_mode(dcp, data, cookie);
+		dcp_modeset_actual_done(dcp, data, cookie);
 		return;
 	}
 	dcp_get_mode_info(dcp, &modeset->actual, dcp_modeset_after_actual_info,
@@ -2865,6 +2967,8 @@ static void dcp_modeset_after_bootstrap_info(struct apple_dcp *dcp, void *data,
 {
 	struct dcp_modeset_cookie *modeset = cookie;
 
+	if (dcp_modeset_callback_failed(dcp, cookie))
+		return;
 	if (!data) {
 		complete_set_digital_out_mode(dcp, NULL, cookie);
 		return;
@@ -2886,6 +2990,38 @@ static void dcp_modeset_select(struct apple_dcp *dcp, void *out, void *cookie)
 				  dcp_modeset_after_actual_info, cookie);
 }
 
+static void dcp_modeset_sync_done(struct apple_dcp *dcp, void *data,
+				  void *cookie)
+{
+	struct dcp_modeset_cookie *modeset = cookie;
+
+	if (dcp_modeset_callback_failed(dcp, cookie))
+		return;
+	if (!data || get_unaligned_le32(data)) {
+		if (data && modeset->vrr) {
+			dcp_modeset_fixed_fallback(dcp, modeset);
+			return;
+		}
+		complete_set_digital_out_mode(dcp, data, cookie);
+		return;
+	}
+	dcp_modeset_select(dcp, NULL, cookie);
+}
+
+static void dcp_modeset_sync(struct apple_dcp *dcp, void *cookie)
+{
+	struct dcp_modeset_cookie *modeset = cookie;
+	struct dcp_set_parameter_dcp param;
+
+	/* Match the desktop parameter record, including its unused padding. */
+	memset(&param, 0xaa, sizeof(param));
+	param.param = IOMFBPARAM_ADAPTIVE_SYNC;
+	memset(param.value, 0, 3 * sizeof(u64));
+	param.value[0] = modeset->vrr ? modeset->min_vrr : 0;
+	param.count = 3;
+	dcp_set_parameter_dcp(dcp, false, &param, dcp_modeset_sync_done, cookie);
+}
+
 int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 			       struct drm_crtc_state *crtc_state)
 {
@@ -2897,6 +3033,9 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 
 	if (dcp->crashed)
 		return -ENODEV;
+	/* A timed-out command still owns its channel until firmware replies. */
+	if (READ_ONCE(dcp->ch_cmd.depth))
+		return -EBUSY;
 
 	if (!lookup_mode(dcp, &crtc_state->mode, mode)) {
 		dev_err(dcp->dev, "no match for " DRM_MODE_FMT "\n",
@@ -2927,11 +3066,9 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 		.timing_mode_id = mode->timing_mode_id
 	};
 
-	/*
-	 * Suspected VRR modes need swap timestamps, see iomfb_flush().
-	 * Adaptive sync itself stays off, see dcp_mode_vrr_supported().
-	 */
-	dcp->use_timestamps = mode->vrr;
+	/* ProMotion needs desktop timestamps in fixed-120 mode too. */
+	dcp->use_timestamps = mode->needs_timestamps;
+	dcp->desktop->vrr_requested = crtc_state->vrr_enabled;
 
 	/*
 	 * The firmware changes a fixed panel's mode through the swap geometry,
@@ -2949,6 +3086,12 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 		return -ENOMEM;
 	cookie = &modeset->wait;
 	modeset->actual = dcp->mode;
+	modeset->program_sync = dcp_has_panel(dcp) && dcp->main_display &&
+		(dcp_desktop_vrr_supported(dcp) || dcp->vrr_enabled ||
+		 READ_ONCE(dcp->desktop->vrr_failed));
+	modeset->vrr = modeset->program_sync && mode->vrr &&
+		       crtc_state->vrr_enabled && dcp_desktop_vrr_supported(dcp);
+	modeset->min_vrr = mode->min_vrr;
 
 	cookie->status = ~0U;
 	init_completion(&cookie->done);
@@ -2971,7 +3114,12 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 			 modeset->bootstrap.timing_mode_id);
 	}
 
-	dcp_modeset_select(dcp, NULL, cookie);
+	WRITE_ONCE(dcp->desktop->modeset_callback_error, false);
+	WRITE_ONCE(dcp->desktop->modeset_active, true);
+	if (modeset->program_sync)
+		dcp_modeset_sync(dcp, cookie);
+	else
+		dcp_modeset_select(dcp, NULL, cookie);
 
 	/*
 	 * The DCP firmware has an internal timeout of ~8 seconds for
@@ -2988,6 +3136,9 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 		dev_err(dcp->dev,
 			"waiting on set_digital_out_mode failed:%d\n", ret);
 		ret = -EIO;
+	} else if (READ_ONCE(dcp->desktop->modeset_callback_error)) {
+		dev_err(dcp->dev, "unsupported callback during mode set\n");
+		ret = -EOPNOTSUPP;
 	} else if (!READ_ONCE(cookie->replied)) {
 		dev_err(dcp->dev, "set_digital_out_mode got no reply\n");
 		ret = -EIO;
@@ -3001,6 +3152,10 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 			jiffies_to_msecs(ret));
 		ret = 0;
 	}
+	WRITE_ONCE(dcp->desktop->modeset_active, false);
+	dcp->vrr_enabled = !ret && modeset->vrr;
+	if (modeset->notify_vrr_failure && dcp->connector)
+		dcp_queue_hotplug(dcp->connector);
 	kref_put(&cookie->refcount, release_wait_cookie);
 
 	dcp->desktop->mode_live = !ret;
@@ -3161,7 +3316,10 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
 	struct DCP_FW_NAME(dcp_swap_submit_req) *req = &DCP_FW_SWAP(dcp);
 	int plane_idx, l;
 	int has_surface = 0;
+
+#if !DCP_FW_DESKTOP_26(DCP_FW_VER)
 	bool update_brightness;
+#endif
 
 	crtc_state = drm_atomic_get_new_crtc_state(commit, crtc);
 
@@ -3262,19 +3420,13 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
 	}
 
 #if DCP_FW_DESKTOP_26(DCP_FW_VER)
-	if (has_surface && dcp->use_timestamps) {
-		/*
-		 * Timestamp types 1, 2 and 7 hold the time the swap should be
-		 * shown, in the firmware's clock.  A target long past shows it
-		 * at the next refresh: 120 Hz in the fixed mode, as soon as
-		 * the panel allows with adaptive sync.  The architectural
-		 * counter must not go here: after a VRR mode set the firmware
-		 * then never shows the swap, and it holds a swap whose target
-		 * it reads as more than about a frame ahead.
-		 */
-		req->swap.timestamp[0] = 120;
-		req->swap.timestamp[1] = 120;
-		req->swap.timestamp[6] = 120;
+	{
+		u64 deadline = dcp_desktop_present_deadline(has_surface, dcp->use_timestamps);
+
+		/* Types 1, 2 and 7 carry the same desktop presentation deadline. */
+		req->swap.timestamp[0] = deadline;
+		req->swap.timestamp[1] = deadline;
+		req->swap.timestamp[6] = deadline;
 	}
 #else
 	if (has_surface && (dcp->use_timestamps || dcp->vrr_enabled)) {
@@ -3303,28 +3455,16 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
 	/* These fields should be set together */
 	req->swap.swap_completed = req->swap.swap_enabled;
 
+#if DCP_FW_DESKTOP_26(DCP_FW_VER)
+	/* The shared ramp is encoded after swap_start, at submission time. */
+	dcp->brightness.update = false;
+#else
 	/* update brightness if changed */
 	update_brightness = dcp_has_panel(dcp) && dcp->brightness.update;
 #if DCP_FW_H17(DCP_FW_VER)
 	update_brightness = update_brightness &&
 			    dcp->hw.iomfb_method_profile == DCP_IOMFB_METHODS_H17G;
 #endif
-#if DCP_FW_DESKTOP_26(DCP_FW_VER)
-	/*
-	 * The firmware publishes no initial level, so nits stays at the
-	 * registration default until userspace writes the backlight.  Sending
-	 * that from the forced post-poweron update can turn the panel off:
-	 * keep the level the boot loader set until one is requested.
-	 */
-	if (update_brightness && !dcp->brightness.requested) {
-		dcp->brightness.update = false;
-		update_brightness = false;
-	}
-	if (update_brightness) {
-		dcp_swap_set_brightness(&req->swap, dcp->brightness.nits);
-		dcp->brightness.update = false;
-	}
-#else
 	if (update_brightness) {
 #if DCP_FW_LAYOUT_14_7(DCP_FW_VER)
 		req->swap.bl_update = 1;

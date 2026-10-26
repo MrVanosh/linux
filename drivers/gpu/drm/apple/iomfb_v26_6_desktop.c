@@ -81,14 +81,78 @@ static bool trampoline_passthrough_dict_v26_6(struct apple_dcp *dcp, int tag,
 	struct dcp_dict_passthrough_resp_v26_6 *resp = out;
 
 	trace_iomfb_callback(dcp, tag, "dcpep_cb_passthrough_dict");
+	dcp_trace_panel_property(dcp, tag, (const char *)req->key,
+				 strnlen((const char *)req->key, sizeof(req->key)),
+				 req->value_null ? NULL : req->value, sizeof(req->value));
 
-	if (!req->value_null)
+	if (!req->value_null) {
+		dcp_panel_edid_receive(dcp, req->value, sizeof(req->value));
 		memcpy(resp->value, req->value, sizeof(resp->value));
+	}
 
 	resp->ret = false;
 	memset(resp->padding, 0, sizeof(resp->padding));
 
 	return true;
+}
+
+/* The firmware can publish panel identity through dictionary setters too. */
+static bool trampoline_panel_dictionary_v26_6(struct apple_dcp *dcp, int tag,
+					      void *out, void *in)
+{
+	/* Service dictionary setters prefix the same record with a handle. */
+	const struct dcp_dict_passthrough_req_v26_6 *req = tag == 413 ? in + 4 : in;
+	const char *key = (const char *)req->key;
+	struct dcp_display_metadata metadata;
+	struct dcp_parse_ctx ctx;
+	int ret;
+
+	trace_iomfb_callback(dcp, tag, __func__);
+	dcp_trace_panel_property(dcp, tag, key, strnlen(key, sizeof(req->key)),
+				 req->value_null ? NULL : req->value, sizeof(req->value));
+	if (!dcp_has_panel(dcp) || req->value_null ||
+	    !memchr(key, 0, sizeof(req->key)))
+		goto done;
+	/* A real EDID may be a blob or nested in a property dictionary. */
+	dcp_panel_edid_receive(dcp, req->value, sizeof(req->value));
+	if (strcmp(key, "DisplayAttributes") && strcmp(key, "ProductAttributes"))
+		goto done;
+	ret = parse(req->value, sizeof(req->value), &ctx);
+	if (ret)
+		goto done;
+	if (!strcmp(key, "ProductAttributes"))
+		ret = parse_panel_product_metadata(&ctx, &metadata);
+	else
+		ret = parse_panel_metadata(&ctx, &metadata);
+	if (!ret)
+		dcp_panel_metadata_replace(dcp, &metadata);
+done:
+	/* Preserve the existing setter acknowledgment for unrelated properties. */
+	*(u8 *)out = true;
+	return true;
+}
+
+bool iomfb_check_callback_v26_6_desktop(int tag, u32 in_len, u32 out_len)
+{
+	switch (tag) {
+	case 201:
+		return in_len == 12 && out_len == 16;
+	case 202:
+		return in_len == 24 && !out_len;
+	case 451:
+		return in_len == 20 && out_len == 28;
+	case 452:
+		return in_len == 24 && out_len == 20;
+	case 454:
+		return in_len == 4 && out_len == 4;
+	case 413:
+		return in_len == 4168 && (out_len == 1 || out_len == 4);
+	case 552:
+	case 561:
+		return in_len == 4164 && (out_len == 1 || out_len == 4);
+	default:
+		return true;
+	}
 }
 
 /*
@@ -174,13 +238,14 @@ static const iomfb_cb_handler cb_handlers[IOMFB_MAX_CB] = {
 	[406] = trampoline_nop, /* set_fx_prop: a property notification */
 	[408] = trampoline_get_frequency,
 	[411] = trampoline_map_reg,
-	[413] = trampoline_true, /* sr_set_property_dict */
+	[413] = trampoline_panel_dictionary_v26_6, /* sr_set_property_dict */
 	[414] = trampoline_sr_set_property_int,
 	[415] = trampoline_true, /* sr_set_property_bool */
 	[451] = trampoline_allocate_buffer,
+	[452] = trampoline_map_physical,
 	[454] = trampoline_release_mem_desc_v26_6,
-	[552] = trampoline_true, /* set_property_dict_0 */
-	[561] = trampoline_true, /* set_property_dict */
+	[552] = trampoline_panel_dictionary_v26_6,
+	[561] = trampoline_panel_dictionary_v26_6,
 	[563] = trampoline_true, /* set_property_int */
 	[565] = trampoline_true, /* set_property_bool */
 	[567] = trampoline_true, /* set_property_str */
@@ -190,6 +255,7 @@ static const iomfb_cb_handler cb_handlers[IOMFB_MAX_CB] = {
 	[576] = trampoline_nop,
 	[581] = trampoline_nop,
 	[582] = trampoline_true, /* create_default_fb_surface */
+	[588] = trampoline_nop, /* resize_default_fb_surface_gated */
 	[590] = trampoline_swap_complete,
 	[592] = trampoline_swap_complete_intent_gated,
 	[593] = trampoline_abort_swap_ap_gated,
