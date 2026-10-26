@@ -73,6 +73,17 @@
 #define APPLE_DVFS_TRANSITION_TIMEOUT 400
 
 /*
+ * Lazy verification: the timer checks the last request written this long
+ * after it, with this much slack so that it can share an interrupt with other
+ * timers. A request kept pending behind a busy transition is retried about
+ * when that transition should finish, and then at the short interval.
+ */
+#define APPLE_DVFS_VERIFY_LAZY_NS	(1 * NSEC_PER_MSEC)
+#define APPLE_DVFS_VERIFY_SLACK_NS	(500 * NSEC_PER_USEC)
+#define APPLE_DVFS_TRANSITION_NS	(50 * NSEC_PER_USEC)
+#define APPLE_DVFS_RETRY_NS		(4 * NSEC_PER_USEC)
+
+/*
  * Fast die-temperature limit
  *
  * The power management processor (PMP) of some SoCs runs a control loop on
@@ -214,6 +225,22 @@ struct apple_cpu_priv {
 	unsigned int expected_pstate;
 	struct freq_qos_request unmanaged_cap;
 	bool thermal_owned;
+	/*
+	 * Lazy verification, see apple_soc_cpufreq_lazy_request(): the lock
+	 * serialises the command register, expected_pstate and
+	 * transition_failed between the scheduler's requests, the timer that
+	 * verifies them and ->target_index.
+	 */
+	raw_spinlock_t lock;
+	struct hrtimer verify_timer;
+	/* When the last request was written, and when it times out. */
+	ktime_t write_time;
+	ktime_t verify_deadline;
+	/* P-state requested while a transition was busy, or -1. */
+	int pending_pstate;
+	/* A failure the verify timer has yet to report, and its command. */
+	bool failure_unreported;
+	u64 failure_command;
 };
 
 static struct cpufreq_driver apple_soc_cpufreq_driver;
@@ -248,12 +275,11 @@ static const struct apple_soc_cpufreq_info soc_t8112_info = {
 /*
  * T8140 uses 5-bit PS1 state IDs starting at 1. The command register reads
  * back the last accepted request, not a measured frequency; each request is
- * verified, see apple_soc_cpufreq_request(). Requests from the scheduler's
- * fast-switch path are verified when the next one is issued rather than
- * waited for, so schedutil can switch from the scheduler; requests through
- * ->target_index (suspend, the static governors) are still waited for.
- * Voltage, PLL and firmware throttling configuration are left as the
- * bootloader set them.
+ * verified. Requests from the scheduler's fast-switch path are verified by a
+ * timer rather than waited for, so schedutil can switch from the scheduler,
+ * see apple_soc_cpufreq_lazy_request(); requests through ->target_index
+ * (suspend, the static governors) are still waited for. Voltage, PLL and
+ * firmware throttling configuration are left as the bootloader set them.
  */
 static const struct apple_soc_cpufreq_info soc_t8140_info = {
 	.verify_transition = true,
@@ -387,14 +413,25 @@ static unsigned int apple_soc_cpufreq_get_rate(unsigned int cpu)
 	return 0;
 }
 
+/* Writes a request for @pstate into the command register value @reg. */
+static void apple_soc_cpufreq_write(struct apple_cpu_priv *priv, u64 reg,
+				    unsigned int pstate)
+{
+	reg &= ~priv->info->ps1_mask;
+	reg |= pstate << priv->info->ps1_shift;
+	if (priv->info->has_ps2)
+		FIELD_MODIFY(APPLE_DVFS_CMD_PS2, &reg, pstate);
+	reg |= APPLE_DVFS_CMD_SET;
+
+	writeq_relaxed(reg, priv->reg_base + APPLE_DVFS_CMD);
+}
+
 /*
- * Requests the frequency table entry @index. With @wait, a SoC that verifies
- * transitions waits for this one to be accepted; without it, the next request
- * checks it: it waits for BUSY to clear and requires the accepted state to
- * match.
+ * Requests the frequency table entry @index and, on a SoC that verifies
+ * transitions, waits for the cluster to accept it.
  */
 static int apple_soc_cpufreq_request(struct cpufreq_policy *policy,
-				     unsigned int index, bool wait)
+				     unsigned int index)
 {
 	struct apple_cpu_priv *priv = policy->driver_data;
 	unsigned int pstate = policy->freq_table[index].driver_data;
@@ -431,15 +468,9 @@ static int apple_soc_cpufreq_request(struct cpufreq_policy *policy,
 			return 0;
 	}
 
-	reg &= ~priv->info->ps1_mask;
-	reg |= pstate << priv->info->ps1_shift;
-	if (priv->info->has_ps2)
-		FIELD_MODIFY(APPLE_DVFS_CMD_PS2, &reg, pstate);
-	reg |= APPLE_DVFS_CMD_SET;
+	apple_soc_cpufreq_write(priv, reg, pstate);
 
-	writeq_relaxed(reg, priv->reg_base + APPLE_DVFS_CMD);
-
-	if (priv->info->verify_transition && wait &&
+	if (priv->info->verify_transition &&
 	    readq_poll_timeout_atomic(priv->reg_base + APPLE_DVFS_CMD, reg,
 				      !(reg & APPLE_DVFS_CMD_BUSY) &&
 				      FIELD_GET(APPLE_DVFS_CMD_PS1, reg) == pstate,
@@ -456,10 +487,210 @@ static int apple_soc_cpufreq_request(struct cpufreq_policy *policy,
 	return 0;
 }
 
+/*
+ * Lazy verification (lazy_verify SoCs)
+ *
+ * A transition takes about 50 us. The scheduler's fast-switch path must not
+ * wait for one, nor drop a request: schedutil records the frequency it asked
+ * for and does not ask again for the same one.
+ *
+ * A request finding the cluster idle requires the accepted state to be the
+ * one last written, so verifying the previous request, and is written at
+ * once. The verify timer checks the last request written in the same way
+ * within APPLE_DVFS_VERIFY_LAZY_NS plus slack, so the last request of a burst
+ * is verified like every other; a transition still busy then is followed
+ * until it finishes or its timeout has passed.
+ *
+ * A request finding the cluster busy is kept as pending, replacing an older
+ * pending one. The timer writes it as soon as the transition has finished,
+ * after the same check, and then verifies it as above.
+ *
+ * A failure stops all further requests, as for a request that is waited for,
+ * and the timer reports it.
+ *
+ * Called with priv->lock held.
+ */
+static void apple_soc_cpufreq_fail(struct apple_cpu_priv *priv, u64 reg)
+{
+	priv->transition_failed = true;
+	priv->pending_pstate = -1;
+	/* The scheduler may hold a runqueue lock: the timer reports it. */
+	priv->failure_unreported = true;
+	priv->failure_command = reg;
+}
+
+/* Reports a failure recorded by apple_soc_cpufreq_fail(), once. */
+static void apple_soc_cpufreq_report(struct apple_cpu_priv *priv, u64 reg,
+				     unsigned int expected)
+{
+	if (reg & APPLE_DVFS_CMD_BUSY)
+		dev_err(priv->cpu_dev,
+			"DVFS busy timeout, command=%#llx; stopping requests\n", reg);
+	else
+		dev_err(priv->cpu_dev,
+			"unexpected DVFS state %u (expected %u); stopping requests\n",
+			(unsigned int)FIELD_GET(APPLE_DVFS_CMD_PS1, reg), expected);
+}
+
+/*
+ * Writes @pstate if it differs from the accepted state, given the idle
+ * command register @reg, and returns whether a transition is now in flight.
+ * Called with priv->lock held.
+ */
+static bool apple_soc_cpufreq_lazy_write(struct apple_cpu_priv *priv, u64 reg,
+					 unsigned int pstate)
+{
+	if (FIELD_GET(APPLE_DVFS_CMD_PS1, reg) != priv->expected_pstate) {
+		apple_soc_cpufreq_fail(priv, reg);
+		return false;
+	}
+	if (pstate == priv->expected_pstate)
+		return false;
+
+	apple_soc_cpufreq_write(priv, reg, pstate);
+	priv->expected_pstate = pstate;
+	priv->write_time = ktime_get();
+	priv->verify_deadline = ktime_add_us(priv->write_time,
+					     apple_soc_cpufreq_timeout(priv->info));
+	return true;
+}
+
+/* Called with priv->lock held. */
+static void apple_soc_cpufreq_verify_later(struct apple_cpu_priv *priv)
+{
+	hrtimer_start_range_ns(&priv->verify_timer,
+			       ns_to_ktime(APPLE_DVFS_VERIFY_LAZY_NS),
+			       APPLE_DVFS_VERIFY_SLACK_NS, HRTIMER_MODE_REL_HARD);
+}
+
+static enum hrtimer_restart apple_soc_cpufreq_verify(struct hrtimer *timer)
+{
+	struct apple_cpu_priv *priv = container_of(timer, struct apple_cpu_priv,
+						   verify_timer);
+	unsigned int expected;
+	bool report = false;
+	unsigned long flags;
+	u64 reg;
+
+	raw_spin_lock_irqsave(&priv->lock, flags);
+	if (priv->transition_failed)
+		goto out;
+
+	/*
+	 * Re-armed with hrtimer_start(), never forwarded: a request may have
+	 * queued the timer again while this callback waited for the lock.
+	 */
+	reg = readq_relaxed(priv->reg_base + APPLE_DVFS_CMD);
+	if (reg & APPLE_DVFS_CMD_BUSY) {
+		ktime_t now = ktime_get();
+
+		if (ktime_after(now, priv->verify_deadline))
+			apple_soc_cpufreq_fail(priv, reg);
+		else if (priv->pending_pstate >= 0)
+			hrtimer_start(timer, ns_to_ktime(APPLE_DVFS_RETRY_NS),
+				      HRTIMER_MODE_REL_HARD);
+		else
+			hrtimer_start(timer, priv->verify_deadline,
+				      HRTIMER_MODE_ABS_HARD);
+	} else if (priv->pending_pstate >= 0) {
+		unsigned int pstate = priv->pending_pstate;
+
+		priv->pending_pstate = -1;
+		if (apple_soc_cpufreq_lazy_write(priv, reg, pstate))
+			apple_soc_cpufreq_verify_later(priv);
+	} else if (FIELD_GET(APPLE_DVFS_CMD_PS1, reg) != priv->expected_pstate) {
+		apple_soc_cpufreq_fail(priv, reg);
+	}
+out:
+	if (priv->failure_unreported) {
+		priv->failure_unreported = false;
+		report = true;
+		reg = priv->failure_command;
+		expected = priv->expected_pstate;
+	}
+	raw_spin_unlock_irqrestore(&priv->lock, flags);
+	if (report)
+		apple_soc_cpufreq_report(priv, reg, expected);
+	return HRTIMER_NORESTART;
+}
+
+/*
+ * Requests the frequency table entry @index from the scheduler's fast-switch
+ * path without waiting, see "Lazy verification" above.
+ */
+static int apple_soc_cpufreq_lazy_request(struct cpufreq_policy *policy,
+					  unsigned int index)
+{
+	struct apple_cpu_priv *priv = policy->driver_data;
+	unsigned int pstate = policy->freq_table[index].driver_data;
+	unsigned long flags;
+	int ret = 0;
+	u64 reg;
+
+	if (pstate < priv->info->min_pstate || pstate > priv->info->max_pstate)
+		return -EINVAL;
+
+	raw_spin_lock_irqsave(&priv->lock, flags);
+	if (priv->transition_failed) {
+		ret = -EIO;
+		goto out;
+	}
+
+	reg = readq_relaxed(priv->reg_base + APPLE_DVFS_CMD);
+	if (reg & APPLE_DVFS_CMD_BUSY) {
+		/* Retry about when the transition should have finished. */
+		ktime_t now = ktime_get();
+		ktime_t at = ktime_add_ns(priv->write_time, APPLE_DVFS_TRANSITION_NS);
+
+		if (ktime_before(at, ktime_add_ns(now, APPLE_DVFS_RETRY_NS)))
+			at = ktime_add_ns(now, APPLE_DVFS_RETRY_NS);
+		priv->pending_pstate = pstate;
+		if (!hrtimer_active(&priv->verify_timer) &&
+		    ktime_after(now, priv->verify_deadline))
+			priv->verify_deadline =
+				ktime_add_us(now, apple_soc_cpufreq_timeout(priv->info));
+		if (!hrtimer_is_queued(&priv->verify_timer) ||
+		    ktime_after(hrtimer_get_softexpires(&priv->verify_timer), at))
+			hrtimer_start(&priv->verify_timer, at, HRTIMER_MODE_ABS_HARD);
+		goto out;
+	}
+
+	/* An idle cluster has accepted, or refused, the previous request. */
+	priv->pending_pstate = -1;
+	if (apple_soc_cpufreq_lazy_write(priv, reg, pstate)) {
+		if (!hrtimer_is_queued(&priv->verify_timer))
+			apple_soc_cpufreq_verify_later(priv);
+	} else if (priv->transition_failed) {
+		/* Let the timer report it, outside the scheduler. */
+		hrtimer_start(&priv->verify_timer, 0, HRTIMER_MODE_REL_HARD);
+		ret = -EIO;
+	}
+out:
+	raw_spin_unlock_irqrestore(&priv->lock, flags);
+	return ret;
+}
+
 static int apple_soc_cpufreq_set_target(struct cpufreq_policy *policy,
 					unsigned int index)
 {
-	return apple_soc_cpufreq_request(policy, index, true);
+	struct apple_cpu_priv *priv = policy->driver_data;
+	unsigned long flags;
+	int ret;
+
+	if (!priv->info->lazy_verify)
+		return apple_soc_cpufreq_request(policy, index);
+
+	/*
+	 * Waited-for requests (suspend, the static governors) replace any
+	 * pending one; the lock keeps a late fast-switch request out until
+	 * this one is accepted.
+	 */
+	hrtimer_cancel(&priv->verify_timer);
+	raw_spin_lock_irqsave(&priv->lock, flags);
+	priv->pending_pstate = -1;
+	ret = apple_soc_cpufreq_request(policy, index);
+	raw_spin_unlock_irqrestore(&priv->lock, flags);
+	return ret;
 }
 
 static unsigned int apple_soc_cpufreq_fast_switch(struct cpufreq_policy *policy,
@@ -472,9 +703,13 @@ static unsigned int apple_soc_cpufreq_fast_switch(struct cpufreq_policy *policy,
 	 */
 	int idx = cpufreq_table_find_index_l(policy, target_freq, false);
 
-	if (idx < 0 || apple_soc_cpufreq_request(policy, idx, !priv->info->lazy_verify) < 0)
+	if (idx < 0)
+		return 0;
+	if (priv->info->lazy_verify ? apple_soc_cpufreq_lazy_request(policy, idx) :
+				      apple_soc_cpufreq_request(policy, idx))
 		return 0;
 
+	/* A lazy request is committed: the cluster applies it within microseconds. */
 	return policy->freq_table[idx].frequency;
 }
 
@@ -1012,6 +1247,10 @@ static int apple_soc_cpufreq_init(struct cpufreq_policy *policy)
 	priv->cpu_dev = cpu_dev;
 	priv->reg_base = reg_base;
 	priv->info = info;
+	raw_spin_lock_init(&priv->lock);
+	hrtimer_setup(&priv->verify_timer, apple_soc_cpufreq_verify, CLOCK_MONOTONIC,
+		      HRTIMER_MODE_REL_HARD);
+	priv->pending_pstate = -1;
 	policy->driver_data = priv;
 	policy->freq_table = freq_table;
 
@@ -1068,6 +1307,8 @@ static void apple_soc_cpufreq_exit(struct cpufreq_policy *policy)
 {
 	struct apple_cpu_priv *priv = policy->driver_data;
 
+	/* The governor has stopped: no request re-arms the verify timer. */
+	hrtimer_cancel(&priv->verify_timer);
 	/* Drain firmware-limit updates before releasing the OPP tables. */
 	apple_fast_die_exit(priv);
 
