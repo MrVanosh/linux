@@ -131,3 +131,33 @@ both ``brightness`` and ``actual_brightness``. The work runs outside the receive
 path's locks and is drained during shutdown. Takeover sends the same event when
 it updates the inherited level. Requested brightness remains the user's target
 through the fade; notifications do not replace it with an intermediate level.
+
+DT capability and boot-loader handoff
+-----------------------------------
+
+The J616 panel's existing DT compatible supplies adaptive-sync capability;
+there is no T6041 VRR module parameter. Firmware and mode validation, the main
+panel restriction, and the fixed-refresh failure latch still apply. EDID and
+backlight notifications have no driver-specific tunables.
+
+The kernel does not consume ``chosen.asahi,t6041-dcp``. Its early T6041 gate
+already follows the handoff published by m1n1: ``apple,t6041-handoff = <1>`` on
+DCP, display and PIODMA, firmware compatibility 26.6.2, the expected DART stream
+and mailbox relationships, initially disabled nodes, and a running DCP.
+The DCP driver separately validates register resources and the firmware memory
+handoff. Missing or invalid handoff data leaves the boot framebuffer in place.
+These checks must remain when the loader's policy changes.
+
+The current m1n1 producer uses that chosen property to decide whether to attempt
+publication. Removing it cannot be completed by a kernel change: a loader with
+no published handoff provides nothing for the kernel to adopt. The producer
+needs to select the T6041 handoff from its existing chip/board match and the
+supported DCP/display/panel DT compatibles, then run the existing ADT, power,
+running-session, firmware-segment, reservation and live DART mapping checks
+without a chosen opt-in. Only a successful transaction may publish the existing
+markers, memory regions and firmware properties. Keeping nodes disabled until
+the kernel accepts that contract preserves compatibility with older kernels.
+A failed transaction must publish no partial handoff. Loader host tests should
+cover supported DT without the chosen property, an unsupported board/DT, and
+each failed validation, as well as unchanged other-SoC policy. No new policy
+flag or kernel bypass is needed. This kernel series does not replace Stage 2.
