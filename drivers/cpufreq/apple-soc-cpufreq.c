@@ -122,9 +122,10 @@
  * warning has been given.  A nohz_full CPU can run a task with its tick
  * stopped, and so without sampling, so a cluster with nohz_full CPUs
  * samples from the hrtimer all the time.  Where schedutil switches frequency
- * from the scheduler (fast switch), a lower limit reaches the cluster at its
- * next scheduler frequency update rather than at once, which a nohz_full CPU
- * running with its tick stopped may not have for a long time.
+ * from the scheduler (fast switch), it picks up a lower limit only at its
+ * next frequency update, which a nohz_full CPU running with its tick stopped
+ * may not have for a long time, so the sample applies the limit to the
+ * cluster itself, see apple_soc_cpufreq_lazy_cap().
  *
  * A sample reads the effort through the PMP report driver; only when the
  * limit it maps to changes is a work item queued to update the QoS request,
@@ -228,9 +229,10 @@ struct apple_cpu_priv {
 	/*
 	 * Lazy verification, see apple_soc_cpufreq_lazy_request(): the lock
 	 * serialises the command register, expected_pstate and
-	 * transition_failed between the scheduler's requests and the timer
-	 * that verifies them. Waited-for requests cancel the timer first and
-	 * do not take it.
+	 * transition_failed between the scheduler's requests, the timer that
+	 * verifies them and the fast die-temperature samples. Waited-for
+	 * requests cancel the timer first and do not take it; the samples
+	 * then leave the cluster to them.
 	 */
 	raw_spinlock_t lock;
 	struct hrtimer verify_timer;
@@ -239,6 +241,15 @@ struct apple_cpu_priv {
 	ktime_t verify_deadline;
 	/* P-state requested while a transition was busy, or -1. */
 	int pending_pstate;
+	/*
+	 * Highest P-state, and its frequency, that the fast die-temperature
+	 * limit allows, the P-state the scheduler last asked for, and whether
+	 * waited-for requests own the cluster, see apple_soc_cpufreq_lazy_cap().
+	 */
+	unsigned int cap_pstate;
+	unsigned int cap_freq;
+	unsigned int asked_pstate;
+	bool waited;
 	/* A failure the verify timer has yet to report, and its command. */
 	bool failure_unreported;
 	u64 failure_command;
@@ -632,26 +643,16 @@ out:
 }
 
 /*
- * Requests the frequency table entry @index from the scheduler's fast-switch
- * path without waiting, see "Lazy verification" above.
+ * Requests @pstate without waiting, see "Lazy verification" above.
+ * Called with priv->lock held.
  */
-static int apple_soc_cpufreq_lazy_request(struct cpufreq_policy *policy,
-					  unsigned int index)
+static int apple_soc_cpufreq_lazy_set(struct apple_cpu_priv *priv,
+				      unsigned int pstate)
 {
-	struct apple_cpu_priv *priv = policy->driver_data;
-	unsigned int pstate = policy->freq_table[index].driver_data;
-	unsigned long flags;
-	int ret = 0;
 	u64 reg;
 
-	if (pstate < priv->info->min_pstate || pstate > priv->info->max_pstate)
-		return -EINVAL;
-
-	raw_spin_lock_irqsave(&priv->lock, flags);
-	if (priv->transition_failed) {
-		ret = -EIO;
-		goto out;
-	}
+	if (priv->transition_failed)
+		return -EIO;
 
 	reg = readq_relaxed(priv->reg_base + APPLE_DVFS_CMD);
 	if (reg & APPLE_DVFS_CMD_BUSY) {
@@ -669,7 +670,7 @@ static int apple_soc_cpufreq_lazy_request(struct cpufreq_policy *policy,
 		if (!hrtimer_is_queued(&priv->verify_timer) ||
 		    ktime_after(hrtimer_get_softexpires(&priv->verify_timer), at))
 			hrtimer_start(&priv->verify_timer, at, HRTIMER_MODE_ABS_HARD);
-		goto out;
+		return 0;
 	}
 
 	/* An idle cluster has accepted, or refused, the previous request. */
@@ -680,11 +681,69 @@ static int apple_soc_cpufreq_lazy_request(struct cpufreq_policy *policy,
 	} else if (priv->transition_failed) {
 		/* Let the timer report it, outside the scheduler. */
 		hrtimer_start(&priv->verify_timer, 0, HRTIMER_MODE_REL_HARD);
-		ret = -EIO;
+		return -EIO;
 	}
-out:
+	return 0;
+}
+
+/*
+ * Requests the frequency table entry @index from the scheduler's fast-switch
+ * path, at most the fast die-temperature limit, and returns the frequency
+ * requested, or 0 on failure. The request is committed: the cluster applies
+ * it within microseconds.
+ */
+static unsigned int apple_soc_cpufreq_lazy_request(struct cpufreq_policy *policy,
+						   unsigned int index)
+{
+	struct apple_cpu_priv *priv = policy->driver_data;
+	unsigned int pstate = policy->freq_table[index].driver_data;
+	unsigned int freq = policy->freq_table[index].frequency;
+	unsigned long flags;
+	int ret;
+
+	if (pstate < priv->info->min_pstate || pstate > priv->info->max_pstate)
+		return 0;
+
+	raw_spin_lock_irqsave(&priv->lock, flags);
+	priv->waited = false;
+	priv->asked_pstate = pstate;
+	if (pstate > priv->cap_pstate) {
+		pstate = priv->cap_pstate;
+		freq = priv->cap_freq;
+	}
+	ret = apple_soc_cpufreq_lazy_set(priv, pstate);
 	raw_spin_unlock_irqrestore(&priv->lock, flags);
-	return ret;
+	return ret ? 0 : freq;
+}
+
+/*
+ * Applies a new fast die-temperature limit, whose highest P-state is @cap at
+ * @freq, to a lazy_verify cluster at once. schedutil picks up a lower limit
+ * only at its next frequency update, which a nohz_full CPU running with its
+ * tick stopped may not have for a long time. The cluster is moved to the
+ * P-state the scheduler last asked for, at most @cap, and later requests are
+ * clamped to @cap. That also restores the request when the limit rises
+ * again before schedutil has seen it fall: the QoS request is then left
+ * unchanged, so schedutil does not ask again.
+ *
+ * Waited-for requests own the cluster from apple_soc_cpufreq_drain() to the
+ * next fast-switch request, and the core applies the limit to them.
+ */
+static void apple_soc_cpufreq_lazy_cap(struct apple_cpu_priv *priv,
+				       unsigned int cap, unsigned int freq)
+{
+	unsigned int requested, pstate;
+	unsigned long flags;
+
+	raw_spin_lock_irqsave(&priv->lock, flags);
+	priv->cap_pstate = cap;
+	priv->cap_freq = freq;
+	requested = priv->pending_pstate >= 0 ? priv->pending_pstate :
+						priv->expected_pstate;
+	pstate = min(priv->asked_pstate, cap);
+	if (!priv->waited && pstate != requested)
+		apple_soc_cpufreq_lazy_set(priv, pstate);
+	raw_spin_unlock_irqrestore(&priv->lock, flags);
 }
 
 /*
@@ -700,6 +759,11 @@ static int apple_soc_cpufreq_drain(struct apple_cpu_priv *priv)
 	bool report;
 	int pstate;
 	u64 reg;
+
+	/* First, so that no fast die-temperature sample queues the timer again. */
+	raw_spin_lock_irqsave(&priv->lock, flags);
+	priv->waited = true;
+	raw_spin_unlock_irqrestore(&priv->lock, flags);
 
 	hrtimer_cancel(&priv->verify_timer);
 
@@ -764,11 +828,11 @@ static unsigned int apple_soc_cpufreq_fast_switch(struct cpufreq_policy *policy,
 
 	if (idx < 0)
 		return 0;
-	if (priv->info->lazy_verify ? apple_soc_cpufreq_lazy_request(policy, idx) :
-				      apple_soc_cpufreq_request(policy, idx))
+	if (priv->info->lazy_verify)
+		return apple_soc_cpufreq_lazy_request(policy, idx);
+	if (apple_soc_cpufreq_request(policy, idx))
 		return 0;
 
-	/* A lazy request is committed: the cluster applies it within microseconds. */
 	return policy->freq_table[idx].frequency;
 }
 
@@ -860,6 +924,31 @@ static void apple_fast_die_arm(struct apple_fast_die *fd)
 		      HRTIMER_MODE_REL_SOFT);
 }
 
+/*
+ * Applies @limit to a lazy_verify cluster at once, as its fastest state at or
+ * below the limit, see apple_soc_cpufreq_lazy_cap().
+ */
+static void apple_fast_die_cap(struct apple_fast_die *fd, unsigned int limit)
+{
+	struct cpufreq_policy *policy = fd->policy;
+	struct apple_cpu_priv *priv = policy->driver_data;
+	struct cpufreq_frequency_table *pos;
+	unsigned int cap = 0, freq = 0;
+
+	if (!priv->info->lazy_verify)
+		return;
+
+	cpufreq_for_each_valid_entry(pos, policy->freq_table) {
+		if (pos->frequency <= limit && pos->driver_data > cap) {
+			cap = pos->driver_data;
+			freq = pos->frequency;
+		}
+	}
+	/* Limits are frequency-table entries, see apple_fast_die_fit(). */
+	if (freq)
+		apple_soc_cpufreq_lazy_cap(priv, cap, freq);
+}
+
 /* Take a sample and queue an update if the limit changes.  Call with @lock held. */
 static void apple_fast_die_sample(struct apple_fast_die *fd)
 {
@@ -887,6 +976,7 @@ static void apple_fast_die_sample(struct apple_fast_die *fd)
 
 	if (limit != fd->limit) {
 		WRITE_ONCE(fd->limit, limit);
+		apple_fast_die_cap(fd, limit);
 		schedule_work(&fd->work);
 	}
 }
@@ -1060,6 +1150,7 @@ static int apple_fast_die_init(struct cpufreq_policy *policy,
 				   fd->limit);
 	if (ret < 0)
 		goto err_free;
+	apple_fast_die_cap(fd, fd->limit);
 
 	priv->fast_die = fd;
 
@@ -1310,6 +1401,8 @@ static int apple_soc_cpufreq_init(struct cpufreq_policy *policy)
 	hrtimer_setup(&priv->verify_timer, apple_soc_cpufreq_verify, CLOCK_MONOTONIC,
 		      HRTIMER_MODE_REL_HARD);
 	priv->pending_pstate = -1;
+	priv->cap_pstate = info->max_pstate;
+	priv->waited = true;
 	policy->driver_data = priv;
 	policy->freq_table = freq_table;
 
