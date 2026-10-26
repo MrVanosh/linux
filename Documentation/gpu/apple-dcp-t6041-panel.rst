@@ -85,7 +85,12 @@ are dictionary 1, array 2, integer 4, string 9, blob 10 and boolean 11. Values
 are never printed. Each property walk stops at depth 4 or 64 objects, and the
 DCP stops after 128 diagnostic records per callback class (512 total), with bounded
 inspection-status lines in addition. Atomic reservations include framing records. D552, D561, D114 and chunked delivery have
-separate budgets so periodic statistics cannot hide the panel setters.
+separate budgets so periodic statistics cannot hide the panel setters. Service
+dictionary setter D413 is inspected and can supply identity or a raw EDID too.
+Scalar setters D102/D104/D414/D415/D563/D565/D567 report keys and types at
+ingress when their public wire lengths match. They share the
+fourth budget with chunked delivery. Null scalar values report size zero; no
+scalar value or service handle is printed, and acknowledgements are unchanged.
 When KMS debugging is disabled no inspection budget is consumed. Malformed
 serialization only stops inspection.
 

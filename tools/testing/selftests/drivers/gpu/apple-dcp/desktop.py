@@ -391,7 +391,7 @@ def panel_identity(root, output=None):
     dictionary += block(backend, 'static bool trampoline_panel_dictionary_v26_6(')
     dictionary += block(backend, 'bool iomfb_check_callback_v26_6_desktop(')
     bindings = '\n'.join(line for line in block(backend, 'static const iomfb_cb_handler cb_handlers[').splitlines()
-                         if '[552]' in line or '[561]' in line)
+                         if '[413]' in line or '[552]' in line or '[561]' in line)
     unit = code + r'''
 #define DCP_FIRMWARE_V_26_6_DESKTOP 5
 #define trace_iomfb_callback(...) ((void)0)
@@ -453,6 +453,10 @@ int main(int argc, char **argv)
         assert(handlers[tag](&d,tag,short_reply,&wire));
         assert(short_reply[0]==1 && short_reply[1]==0xa5);
         assert(handlers[tag](&d,tag,&result,&wire) && result==1);
+        u8 service[sizeof(wire)+4]={0};memcpy(service+4,&wire,sizeof(wire));
+        assert(iomfb_check_callback_v26_6_desktop(413,sizeof(service),4));
+        assert(!iomfb_check_callback_v26_6_desktop(413,sizeof(service)-1,4));
+        assert(handlers[413](&d,413,&result,service) && result==1);
         assert(desktop.panel_metadata_valid && notifications==1);
         assert(desktop.panel_metadata.serial==(form==2?0:metadata.serial));
         assert(!strcmp(desktop.panel_metadata.manufacturer,"TST"));
@@ -865,6 +869,8 @@ static bool atomic_add_unless(atomic_t *n,int add,int unless)
 struct apple_dcp {int fw_compat;bool has_panel;void *dev;struct {atomic_t identity_log_count[4];} *desktop;};
 static bool kms_debug;
 #define DRM_UT_KMS 4
+#define fallthrough __attribute__((fallthrough))
+typedef uint8_t u8;
 static bool drm_debug_enabled(int category) {assert(category==DRM_UT_KMS);return kms_debug;}
 static unsigned messages;
 static char output[256];
@@ -884,6 +890,7 @@ static int parse_identity_keys(const void *blob,size_t len,dcp_identity_key_fn e
     code+=block(source,'struct dcp_identity_trace {')+';\n'
     code+=block(source,'static void dcp_identity_key_log(')
     code+=block(source,'void dcp_trace_panel_property(')
+    code+=block(source,'static void dcp_trace_panel_setter(')
     return code+r'''
 int main(void)
 {
@@ -891,11 +898,24 @@ int main(void)
     __typeof__(*d.desktop) desktop={0};d.desktop=&desktop;
     const char secret[]="SYNTHETIC_VALUE_NOT_FOR_LOGS";
     dcp_trace_panel_property(&d,561,"Property",8,secret,sizeof(secret));assert(!messages);
+    dcp_trace_panel_setter(&d,563,NULL,76);assert(!messages);
     kms_debug=true;d.fw_compat=1;
     dcp_trace_panel_property(&d,561,"Property",8,secret,sizeof(secret));assert(!messages);
     d.fw_compat=5;d.has_panel=false;
     dcp_trace_panel_property(&d,561,"Property",8,secret,sizeof(secret));assert(!messages);
     d.has_panel=true;
+    u8 setter[4168]={0};strcpy((char *)setter,"ScalarKey");
+    memcpy(setter+64,secret,sizeof(secret));setter[72]=0;
+    dcp_trace_panel_setter(&d,563,setter,75);assert(!messages);
+    dcp_trace_panel_setter(&d,563,setter,76);
+    assert(strstr(output,"ScalarKey type=4 size=8") && !strstr(output,secret));
+    dcp_trace_panel_setter(&d,565,setter,72);assert(strstr(output,"type=11"));
+    dcp_trace_panel_setter(&d,567,setter,128);assert(strstr(output,"type=9"));
+    setter[72]=1;dcp_trace_panel_setter(&d,563,setter,76);assert(strstr(output,"size=0"));
+    memset(setter,0,sizeof(setter));strcpy((char *)setter+4,"ServiceKey");
+    dcp_trace_panel_setter(&d,414,setter,80);assert(strstr(output,"ServiceKey type=4"));
+    dcp_trace_panel_setter(&d,415,setter,76);assert(strstr(output,"ServiceKey type=11"));
+    dcp_trace_panel_setter(&d,102,setter,68);dcp_trace_panel_setter(&d,104,setter,68);
     for(unsigned i=0;i<100;i++)dcp_trace_panel_property(&d,114,"Statistics",10,secret,sizeof(secret));
     assert(atomic_read(&desktop.identity_log_count[2])==128 && !atomic_read(&desktop.identity_log_count[0]) && !atomic_read(&desktop.identity_log_count[1]));
     unsigned before=messages;

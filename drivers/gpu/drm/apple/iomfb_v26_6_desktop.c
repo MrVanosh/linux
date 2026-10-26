@@ -100,7 +100,8 @@ static bool trampoline_passthrough_dict_v26_6(struct apple_dcp *dcp, int tag,
 static bool trampoline_panel_dictionary_v26_6(struct apple_dcp *dcp, int tag,
 					      void *out, void *in)
 {
-	const struct dcp_dict_passthrough_req_v26_6 *req = in;
+	/* Service dictionary setters prefix the same record with a handle. */
+	const struct dcp_dict_passthrough_req_v26_6 *req = tag == 413 ? in + 4 : in;
 	const char *key = (const char *)req->key;
 	struct dcp_display_metadata metadata;
 	struct dcp_parse_ctx ctx;
@@ -144,6 +145,8 @@ bool iomfb_check_callback_v26_6_desktop(int tag, u32 in_len, u32 out_len)
 		return in_len == 24 && out_len == 20;
 	case 454:
 		return in_len == 4 && out_len == 4;
+	case 413:
+		return in_len == 4168 && (out_len == 1 || out_len == 4);
 	case 552:
 	case 561:
 		return in_len == 4164 && (out_len == 1 || out_len == 4);
@@ -235,7 +238,7 @@ static const iomfb_cb_handler cb_handlers[IOMFB_MAX_CB] = {
 	[406] = trampoline_nop, /* set_fx_prop: a property notification */
 	[408] = trampoline_get_frequency,
 	[411] = trampoline_map_reg,
-	[413] = trampoline_true, /* sr_set_property_dict */
+	[413] = trampoline_panel_dictionary_v26_6, /* sr_set_property_dict */
 	[414] = trampoline_sr_set_property_int,
 	[415] = trampoline_true, /* sr_set_property_bool */
 	[451] = trampoline_allocate_buffer,

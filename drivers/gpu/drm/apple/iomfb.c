@@ -88,6 +88,70 @@ void dcp_trace_panel_property(struct apple_dcp *dcp, int tag, const char *key,
 		dev_info(dcp->dev, "panel identity inspection stopped: %d\n", ret);
 }
 
+/* Other property setters use fixed scalar records, not serialization. */
+static void dcp_trace_panel_setter(struct apple_dcp *dcp, int tag,
+				   const void *data, size_t len)
+{
+	struct dcp_identity_trace trace = { .dcp = dcp };
+	const char *in = data;
+	u32 offset = 0, type, size, expected;
+	bool is_null = false;
+
+	if (!drm_debug_enabled(DRM_UT_KMS) ||
+	    dcp->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP || !dcp_has_panel(dcp))
+		return;
+	switch (tag) {
+	case 414:
+		offset = 4;
+		fallthrough;
+	case 563:
+		type = 4;
+		size = 8;
+		expected = offset + 76;
+		break;
+	case 415:
+		offset = 4;
+		fallthrough;
+	case 565:
+		type = 11;
+		size = 4;
+		expected = offset + 72;
+		break;
+	case 567:
+		type = 9;
+		size = 64;
+		expected = 128;
+		break;
+	case 102:
+		type = 4;
+		size = 4;
+		expected = 68;
+		break;
+	case 104:
+		type = 11;
+		size = 1;
+		expected = 68;
+		break;
+	default:
+		return;
+	}
+	/* Inspect only the public wire shape, without changing its handler. */
+	if (len != expected)
+		return;
+	if (tag == 414 || tag == 415 || tag == 563 || tag == 565)
+		is_null = in[offset + 64 + size] & 1;
+	if (tag == 567)
+		size = strnlen(in + 64, 64);
+	/* Scalar/service setters share the bounded miscellaneous-property budget. */
+	trace.count = &dcp->desktop->identity_log_count[3];
+	if (!atomic_add_unless(trace.count, 1, 128))
+		return;
+	dev_info(dcp->dev, "panel identity callback=D%03d bytes=%zu null=%d\n",
+		 tag, len, is_null);
+	dcp_identity_key_log(&trace, in + offset, strnlen(in + offset, 64),
+			     type, is_null ? 0 : size, 0);
+}
+
 static int dcp_tx_offset(enum dcp_context_id id)
 {
 	switch (id) {
@@ -1378,6 +1442,8 @@ static void dcpep_handle_cb(struct apple_dcp *dcp, enum dcp_context_id context,
 
 	in = data + sizeof(*hdr);
 	out = in + hdr->in_len;
+
+	dcp_trace_panel_setter(dcp, tag, in, hdr->in_len);
 
 	if (!handled) {
 		zero_reply = dcp_external_zero_reply(dcp, tag, context,

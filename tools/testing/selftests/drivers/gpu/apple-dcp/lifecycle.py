@@ -1850,6 +1850,7 @@ typedef uint64_t u64;
 #define IOMFB_MAX_CB 600
 #define DCP_PACKET_ALIGNMENT 64
 #define ALIGN(n, a) (((n) + (a) - 1) & ~((a) - 1))
+#define dcp_trace_panel_setter(...) ((void)0)
 #define dev_err(...) ((void)dev)
 #define dev_info(...) ((void)dev)
 #define dev_warn(...) ((void)dev)
