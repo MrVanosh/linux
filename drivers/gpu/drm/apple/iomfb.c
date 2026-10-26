@@ -40,7 +40,7 @@
 #include "parser.h"
 #include "trace.h"
 
-/* Enable for one diagnostic boot with apple_drm.panel_identity_debug=1. */
+/* Enable for one diagnostic boot with appledrm.panel_identity_debug=1. */
 static bool panel_identity_debug;
 module_param(panel_identity_debug, bool, 0600);
 MODULE_PARM_DESC(panel_identity_debug, "Bounded desktop panel property keys and types (no values)");

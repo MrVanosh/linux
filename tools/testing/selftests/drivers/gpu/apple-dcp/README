@@ -188,3 +188,11 @@ partial dictionaries, and notify only when valid identity data actually changes.
 The identity case also exercises the real D552/D561 table bindings, nested
 DisplayAttributes and direct ProductAttributes, legacy manufacturer codes,
 minimal identity data, and unchanged byte/padded boolean acknowledgments.
+
+Desktop identity diagnostics cover bounded traversal of key names and types,
+including truncated and oversized dictionaries. ADT identity tests use only
+synthetic nodes and panel serials, reject truncated trees transactionally and
+ensure the machine's serial cannot override the panel's. Panel EDID tests cover
+a missing firmware identity, real EDID priority and invalid replacement retention.
+Desktop backlight notification tests exercise accepted, rejected, duplicate and
+out-of-order completions and preserve the requested target during notification.

@@ -72,3 +72,53 @@ setters. A legacy PNP manufacturer code is decoded when the text code is absent.
 Missing optional labels are represented by the firmware vendor/product code and
 unspecified numeric serial, without inventing a per-device identity. Partial
 updates for the same vendor/product retain known optional identity fields.
+
+Desktop identity diagnostics and fallback
+-----------------------------------------
+
+Enable ``appledrm.panel_identity_debug=1`` for a diagnostic boot (or set the
+module's ``panel_identity_debug`` parameter before a modeset). D552, D561,
+D114 and chunked property delivery report the outer key, serialized key names,
+value type numbers and lengths. D000 identifies chunked delivery. Type numbers
+are dictionary 1, array 2, integer 4, string 9, blob 10 and boolean 11. Values
+are never printed. Each property walk stops at depth 4 or 64 objects, and the
+DCP stops after 256 key records, with bounded framing/status lines in addition.
+The switch defaults off. Malformed serialization only stops inspection.
+
+A valid real EDID delivered under ``EDID`` or ``edid`` has priority. Without
+one, ProductAttributes remain usable, but are no longer a prerequisite for
+publishing an identity. The fallback reads the original ADT from m1n1's
+reserved-memory ``phram`` node with ``label = "adt"``. The reader accepts at
+most 16 MiB, 4096 nodes, 4096 properties per node and 32 levels, and validates
+all extents before committing any identity data.
+
+The supported ADT identity properties are as follows. These are property
+mappings, not a claim that a particular firmware supplies every property.
+
+* ``/panel`` or ``/product/panel`` ``vendor-id`` or ``display-vendor-id`` is a
+  little-endian 32-bit packed PNP manufacturer code.
+* ``product-id``, ``display-product-id`` or ``panel-id`` supplies the low 16
+  bits of the EDID product code.
+* ``display-serial-number`` supplies a little-endian numeric serial.
+  ``serial-number`` supplies panel serial bytes, hashed with FNV-1a into the
+  numeric EDID serial. ``raw-panel-serial-number`` on ``/product`` or a panel
+  node is handled the same way. Machine serials from other nodes are ignored.
+* ``width-mm`` and ``height-mm`` supply bounded physical dimensions. Missing
+  dimensions retain the OF panel node's ``width-mm`` and ``height-mm`` (or
+  ``adj-height-mm`` when the notch is hidden).
+
+If the ADT or its identity fields are absent, the desktop J616 fallback is
+manufacturer APP, product 0616, name Apple Panel and unspecified numeric
+serial zero, represented by the non-empty serial descriptor ``00000000``.
+This generic identity does not claim to identify an individual panel. The
+preferred representable timing and range limits come from the retained DCP
+TimingElements catalog. Exact mode enumeration continues to use that catalog.
+No new mode, color capability or machine serial is invented. The ADT reader,
+EDID fallback and real EDID setters are restricted to desktop 26.6; T8140
+continues to use its existing path.
+
+Completed desktop brightness changes emit a backlight change uevent and notify
+both ``brightness`` and ``actual_brightness``. The work runs outside the receive
+path's locks and is drained during shutdown. Takeover sends the same event when
+it updates the inherited level. Requested brightness remains the user's target
+through the fade; notifications do not replace it with an intermediate level.
