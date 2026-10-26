@@ -2969,11 +2969,11 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 	}
 
 	/*
-	 * The internal ProMotion panel takes adaptive sync (IOMFBParameter 14,
-	 * minimum rate in 16.16 Hz, 0 = off) before the mode is selected; the
-	 * firmware then reports the mode set with VRR on.
+	 * Adaptive sync (IOMFBParameter 14, minimum rate in 16.16 Hz, 0 = off)
+	 * goes before the mode is selected; the firmware then reports the mode
+	 * set with VRR on.
 	 */
-	if (mode->vrr && dcp->main_display) {
+	if (mode->vrr) {
 		struct dcp_set_parameter_dcp param = {
 			.param = IOMFBPARAM_ADAPTIVE_SYNC,
 			.value = { crtc_state->vrr_enabled ? mode->min_vrr : 0 },
