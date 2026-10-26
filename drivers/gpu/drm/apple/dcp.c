@@ -785,6 +785,15 @@ const struct drm_edid *dcp_firmware_edid(struct apple_dcp *dcp, u64 *generation)
  * without an MTD dependency. Only the desktop panel calls this; other DCP
  * profiles retain their established identity and brightness paths.
  */
+void dcp_panel_read_dimensions(struct apple_dcp *dcp, struct device_node *panel_np)
+{
+	of_property_read_u32(panel_np, "width-mm", &dcp->panel.width_mm);
+	/* Read the full height first: adj-height-mm is optional. */
+	of_property_read_u32(panel_np, "height-mm", &dcp->panel.height_mm);
+	if (dcp->notch_height)
+		of_property_read_u32(panel_np, "adj-height-mm", &dcp->panel.height_mm);
+}
+
 static void dcp_panel_adt_identity(struct apple_dcp *dcp)
 {
 	struct dcp_panel_adt panel = {
@@ -818,8 +827,9 @@ static void dcp_panel_adt_identity(struct apple_dcp *dcp)
 	dcp->panel.width_mm = panel.width_mm;
 	dcp->panel.height_mm = panel.height_mm;
 	dcp->desktop->panel_adt_identity = panel.identity;
-	dev_info(dcp->dev, "panel identity fallback: ADT %s, OF dimensions %ux%u mm\n",
-		 ret ? "unavailable" : "read", panel.width_mm, panel.height_mm);
+	dev_info(dcp->dev, "panel identity fallback: ADT %s, panel node %s, dimensions %ux%u mm\n",
+		 ret ? "unavailable" : "parsed", panel.found ? "present" : "absent",
+		 panel.width_mm, panel.height_mm);
 }
 
 /* Internal panel identity has no detachable Type-C service or EDID transport. */
@@ -4918,8 +4928,6 @@ static int dcp_comp_bind_pipe(struct device *dev, struct device *main, void *dat
 		panel_np = of_get_compatible_child(dev->of_node, "apple,panel");
 
 	if (panel_np) {
-		const char height_prop[2][16] = { "adj-height-mm", "height-mm" };
-
 		if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP) {
 			/*
 			 * Desktop 26.x swaps carry nits, and the panel node
@@ -4939,10 +4947,7 @@ static int dcp_comp_bind_pipe(struct device *dev, struct device *main, void *dat
 
 		/* J616 ProMotion capability belongs to the panel, not a boot option. */
 		dcp->panel.has_vrr = of_device_is_compatible(panel_np, "apple,panel-j616");
-		of_property_read_u32(panel_np, "width-mm", &dcp->panel.width_mm);
-		/* use adjusted height as long as the notch is hidden */
-		of_property_read_u32(panel_np, height_prop[!dcp->notch_height],
-				     &dcp->panel.height_mm);
+		dcp_panel_read_dimensions(dcp, panel_np);
 
 		if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP)
 			dcp_panel_adt_identity(dcp);

@@ -4,6 +4,7 @@
 #include <linux/platform_device.h>
 #include <drm/drm_kunit_helpers.h>
 #include <drm/drm_edid.h>
+#include <drm/drm_property.h>
 #include <drm/drm_atomic_state_helper.h>
 
 #include "dcp.h"
@@ -15,6 +16,7 @@
 #include "iomfb_internal.h"
 #include "parser.h"
 #include "dcp-panel-adt.h"
+#include "dcp-panel-test.h"
 
 static struct device parser_device = {
 	.init_name = "apple-display-parser-test",
@@ -1427,7 +1429,111 @@ static void parser_adt_bounds(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, dcp_panel_adt_parse(NULL, 0, &panel), -EINVAL);
 }
 
+static void parser_panel_of_dimensions(struct kunit *test)
+{
+	__be32 width = cpu_to_be32(345), height = cpu_to_be32(223);
+	__be32 adjusted = cpu_to_be32(216);
+	struct property adj = { .name = "adj-height-mm", .length = 4, .value = &adjusted };
+	struct property h = { .name = "height-mm", .length = 4, .value = &height };
+	struct property w = { .name = "width-mm", .length = 4, .value = &width, .next = &h };
+	struct device_node node = { .properties = &w };
+	struct apple_dcp *dcp = kunit_kzalloc(test, sizeof(*dcp), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, dcp);
+	dcp->notch_height = 74;
+	/* A missing optional adj-height-mm must not erase the full height. */
+	dcp_panel_read_dimensions(dcp, &node);
+	KUNIT_EXPECT_EQ(test, dcp->panel.width_mm, 345U);
+	KUNIT_EXPECT_EQ(test, dcp->panel.height_mm, 223U);
+	h.next = &adj;
+	dcp_panel_read_dimensions(dcp, &node);
+	KUNIT_EXPECT_EQ(test, dcp->panel.height_mm, 216U);
+	dcp->notch_height = 0;
+	dcp_panel_read_dimensions(dcp, &node);
+	KUNIT_EXPECT_EQ(test, dcp->panel.height_mm, 223U);
+}
+
+static void parser_panel_j616s_publication(struct kunit *test)
+{
+	struct apple_dcp *dcp = kunit_kzalloc(test, sizeof(*dcp), GFP_KERNEL);
+	struct dcp_desktop_state *desktop = kunit_kzalloc(test, sizeof(*desktop), GFP_KERNEL);
+	struct platform_device *pipeline = kunit_kzalloc(test, sizeof(*pipeline), GFP_KERNEL);
+	struct apple_connector *connector = kunit_kzalloc(test, sizeof(*connector), GFP_KERNEL);
+	struct dcp_panel_adt panel = {
+		.identity = { .manufacturer = "APP", .product = 0x616, .name = "Apple Panel" },
+		.width_mm = 345, .height_mm = 216,
+	};
+	struct dcp_panel_adt before = panel;
+	struct device *dev = drm_kunit_helper_alloc_device(test);
+	struct drm_device *drm;
+	struct drm_display_mode *published;
+	struct dcp_display_mode mode = panel_test_mode;
+	const struct edid *raw;
+	int count, ret;
+
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, dev);
+	drm = __drm_kunit_helper_alloc_drm_device(test, dev, sizeof(*drm), 0,
+						  DRIVER_MODESET | DRIVER_ATOMIC);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, drm);
+	KUNIT_ASSERT_NOT_NULL(test, dcp);
+	KUNIT_ASSERT_NOT_NULL(test, desktop);
+	KUNIT_ASSERT_NOT_NULL(test, pipeline);
+	KUNIT_ASSERT_NOT_NULL(test, connector);
+	ret = drmm_connector_init(drm, &connector->base, &parser_route_connector_funcs,
+				  DRM_MODE_CONNECTOR_eDP, NULL);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	ret = dcp_panel_adt_parse(panel_test_adt, sizeof(panel_test_adt), &panel);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	/* /product's machine ID is not a panel product; neither panel node exists. */
+	KUNIT_EXPECT_FALSE(test, panel.found);
+	KUNIT_EXPECT_MEMEQ(test, &panel, &before, sizeof(panel));
+	parser_modes_init(dcp);
+	mutex_init(&dcp->dcpavserv.lock);
+	mutex_init(&dcp->hpd_mutex);
+	dcp->dev = dev;
+	dcp->desktop = desktop;
+	dcp->fw_compat = DCP_FIRMWARE_V_26_6_DESKTOP;
+	dcp->panel.width_mm = panel.width_mm;
+	dcp->panel.height_mm = panel.height_mm;
+	desktop->panel_adt_identity = panel.identity;
+	dcp->connector = connector;
+	dcp->modes = &mode;
+	dcp->nr_modes = 1;
+	dcp->modes_admitted = true;
+	connector->dcp = pipeline;
+	connector->edid_live = true;
+	platform_set_drvdata(pipeline, dcp);
+
+	/* Probe through the real iomfb publication path and DRM blob allocator. */
+	mutex_lock(&drm->mode_config.mutex);
+	count = dcp_get_modes(&connector->base);
+	mutex_unlock(&drm->mode_config.mutex);
+	KUNIT_EXPECT_EQ(test, count, 1);
+	KUNIT_ASSERT_NOT_NULL(test, connector->base.edid_blob_ptr);
+	KUNIT_EXPECT_EQ(test, connector->base.edid_blob_ptr->length, (size_t)128);
+	KUNIT_EXPECT_TRUE(test, connector->drm_edid_firmware_derived);
+	raw = connector->base.edid_blob_ptr->data;
+	KUNIT_EXPECT_MEMEQ(test, raw->detailed_timings[1].data.other_data.data.str.str,
+			   "Apple Panel", 11);
+	KUNIT_EXPECT_EQ(test, connector->base.display_info.width_mm, 345U);
+	KUNIT_EXPECT_EQ(test, connector->base.display_info.height_mm, 216U);
+	KUNIT_EXPECT_MEMEQ(test, &mode, &panel_test_mode, sizeof(mode));
+	KUNIT_ASSERT_FALSE(test, list_empty(&connector->base.probed_modes));
+	published = list_first_entry(&connector->base.probed_modes, struct drm_display_mode, head);
+	KUNIT_EXPECT_EQ(test, published->clock, 521065);
+	KUNIT_EXPECT_EQ(test, published->vsync_start, 2278);
+	KUNIT_EXPECT_EQ(test, published->vsync_end, 2360);
+	list_del(&published->head);
+	drm_mode_destroy(drm, published);
+	/* The stack catalogue is not owned by dcp_modes_release(). */
+	dcp->modes = NULL;
+	dcp->nr_modes = 0;
+	dcp_modes_release(dcp);
+}
+
 static struct kunit_case parser_cases[] = {
+	KUNIT_CASE(parser_panel_of_dimensions),
+	KUNIT_CASE(parser_panel_j616s_publication),
 	KUNIT_CASE(parser_adt_bounds),
 	KUNIT_CASE(parser_identity_bounds),
 	KUNIT_CASE(parser_panel_identity_stable),

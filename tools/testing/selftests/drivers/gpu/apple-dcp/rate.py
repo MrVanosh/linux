@@ -700,6 +700,8 @@ static void disable_work_sync(struct work_struct *w) { (void)w; }
 /* This fixture selects an external H17P sink, never desktop adaptive sync. */
 static bool dcp_desktop_vrr_supported(struct apple_dcp *d)
 { assert(d->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP); return false; }
+static void dcp_update_connector_dimensions(struct apple_dcp *d,struct drm_connector *c)
+{ (void)c;assert(d->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP); }
 '''+firmware_lineage(root)+internal_inline(root,'dcp_fw_is_14_7')+r'''/* Off T6030 machines the direct crossbar output is not clocked separately. */
 static int __attribute__((unused)) dcp_direct_crossbar_link(struct apple_dcp *d,bool up) { (void)d;(void)up;return 0; }
 '''

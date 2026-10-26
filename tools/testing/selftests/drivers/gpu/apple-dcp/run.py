@@ -27,6 +27,7 @@ import transaction
 import accounting
 import idle
 import desktop
+import j616s
 import rate
 import boot
 import m4
@@ -61,6 +62,7 @@ def main():
         ('display', 'panel-brightness-takeover', display.takeover, ((),), ()),
         ('display', 'panel-mode-catalog', display.modes, ((),), ()),
         ('display', 'desktop-brightness-notifications', desktop.brightness_notifications, ((),), ()),
+        ('display', 'j616s-panel-identity', lambda r: j616s.identity(r, output), ((),), ('-Wno-unused-function', '-Wno-unused-const-variable')),
         ('display', 'desktop-adt-identity', desktop.adt_identity, ((),), ()),
         ('display', 'desktop-identity-trace-budget', desktop.identity_trace_budget, ((),), ()),
         ('display', 'desktop-identity-keys', desktop.identity_keys, ((),), ('-Wno-unused-function',)),

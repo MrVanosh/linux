@@ -117,6 +117,7 @@ static int dcp_adt_node(struct dcp_adt_cursor *c, struct dcp_panel_adt *panel,
 			dcp_adt_panel_property(panel, name, prop + 36, size);
 		c->pos += 36 + ALIGN((size_t)size, 4);
 	}
+	/* A valid ADT may have neither panel node; retain the OF defaults. */
 	panel->found |= selected;
 	c->pos = props_end;
 	for (u32 i = 0; i < children; i++) {

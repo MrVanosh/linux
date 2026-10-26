@@ -117,7 +117,15 @@ mappings, not a claim that a particular firmware supplies every property.
   node is handled the same way. Machine serials from other nodes are ignored.
 * ``width-mm`` and ``height-mm`` supply bounded physical dimensions. Missing
   dimensions retain the OF panel node's ``width-mm`` and ``height-mm`` (or
-  ``adj-height-mm`` when the notch is hidden).
+  ``adj-height-mm`` when the notch is hidden). The full height is read first,
+  so a missing optional adjusted height cannot leave the height at zero.
+  J616s has a 345x223 mm full panel and a 345x216 mm notch-hidden viewport.
+  The connector retains these exact millimetres after the EDID update.
+
+A successfully parsed ADT does not necessarily contain a panel node. In
+particular, a machine-level ``/product`` ID and ``/arm-io/disp0`` timing data
+are not panel identity properties. They do not override OF panel dimensions
+or prevent the generic fallback from being published.
 
 If the ADT or its identity fields are absent, the desktop J616 fallback is
 manufacturer APP, product 0616, name Apple Panel and unspecified numeric
@@ -125,6 +133,12 @@ serial zero, represented by the non-empty serial descriptor ``00000000``.
 This generic identity does not claim to identify an individual panel. The
 preferred representable timing and range limits come from the retained DCP
 TimingElements catalog. Exact mode enumeration continues to use that catalog.
+For notch-hidden modes, the synthetic identity DTD retains the clock, active
+area and total blanking but bounds the vertical front porch and sync pulse to
+EDID's six-bit fields. It is an identity summary, never an enumerated or
+programmed mode; the original DCP sync positions and mode IDs are unchanged.
+This also lets a 118-line porch and 82-line notch-expanded pulse publish an
+identity instead of failing the base EDID size check.
 The EDID records model year 2024 (not a manufacture date) and a nominal D65
 reference white point required by EDID parsing. No calibrated primaries, gamma,
 new mode or machine serial is claimed. The ADT reader,

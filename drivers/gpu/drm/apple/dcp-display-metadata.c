@@ -205,6 +205,28 @@ const struct drm_edid *dcp_metadata_edid(const struct dcp_display_metadata *meta
 	return edid;
 }
 
+/*
+ * This identity-only DTD is not enumerated or programmed. Keep the DCP clock,
+ * active area and blanking, but fit vertical sync placement into EDID's six-bit
+ * fields. Notch hiding expands the real sync pulse beyond those fields; the
+ * exact syncs remain in the authoritative TimingElements catalogue.
+ */
+static int dcp_panel_identity_timing(struct detailed_timing *timing,
+				     const struct drm_display_mode *mode,
+				     const struct dcp_display_metadata *metadata)
+{
+	struct drm_display_mode summary = *mode;
+
+	/* Refuse invalid source geometry before reducing the EDID summary. */
+	if (mode->vdisplay <= 0 || mode->vdisplay > 4095 ||
+	    mode->vsync_start < mode->vdisplay || mode->vsync_end <= mode->vsync_start ||
+	    mode->vsync_end > mode->vtotal)
+		return -EINVAL;
+	summary.vsync_start = mode->vdisplay + min(mode->vsync_start - mode->vdisplay, 63);
+	summary.vsync_end = summary.vsync_start + min(mode->vsync_end - mode->vsync_start, 63);
+	return dcp_metadata_timing(timing, &summary, metadata);
+}
+
 /* EDID 1.4 range offsets extend each one-byte limit by 255. */
 static int dcp_panel_range_byte(u32 limit, u8 *out, u8 *offsets, u8 flag)
 {
@@ -273,7 +295,7 @@ const struct drm_edid *dcp_panel_edid(const struct dcp_display_metadata *metadat
 		clock = max_t(u32, clock, mode.clock);
 		/* The EDID base timing clock has units of 10 kHz. */
 		mode.clock = DIV_ROUND_CLOSEST(mode.clock, 10) * 10;
-		ret = dcp_metadata_timing(&candidate, &mode, &dimensions);
+		ret = dcp_panel_identity_timing(&candidate, &mode, &dimensions);
 		if (!ret && (!timing || (!preferred && (mode.type & DRM_MODE_TYPE_PREFERRED)))) {
 			struct detailed_pixel_timing *pixel = &candidate.data.pixel_data;
 

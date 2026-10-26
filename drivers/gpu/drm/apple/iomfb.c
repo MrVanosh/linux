@@ -2076,9 +2076,13 @@ int dcp_get_modes(struct drm_connector *connector)
 				dev_info(dcp->dev, "using firmware-derived EDID metadata for connection %llu\n",
 					 generation);
 			}
-		} else if (apple_connector->drm_edid_firmware_derived) {
-			drm_edid_connector_update(connector, NULL);
-			apple_connector->drm_edid_firmware_derived = false;
+		} else {
+			if (panel && nr_modes)
+				dev_dbg(dcp->dev, "panel EDID generation failed: %pe\n", derived);
+			if (apple_connector->drm_edid_firmware_derived) {
+				drm_edid_connector_update(connector, NULL);
+				apple_connector->drm_edid_firmware_derived = false;
+			}
 		}
 	}
 
@@ -2131,6 +2135,10 @@ modes_done:
 		connector->display_info.monitor_range.min_vfreq = min_vfreq;
 		connector->display_info.monitor_range.max_vfreq = max_vfreq;
 	}
+
+	/* EDID base dimensions are rounded to cm; the panel's OF/ADT size is exact. */
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP && dcp_has_panel(dcp))
+		dcp_update_connector_dimensions(dcp, connector);
 
 	return published;
 }
