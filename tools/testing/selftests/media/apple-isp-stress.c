@@ -147,15 +147,6 @@ static int capture(int fd, struct mode mode, unsigned int seconds,
 		measured_fps = (frames - 1) / (last - first);
 	/* Allow clock/29.97-vs-30 rounding; gaps and buffer errors must be zero. */
 	ret = bad || gaps || sequence_gaps || measured_fps < fps * 0.998 ? 1 : 0;
-	printf("{\"cycle\":%u,\"fourcc\":\"%.4s\",\"width\":%u,\"height\":%u,",
-	       cycle, (char *)&mode.fourcc, mode.width, mode.height);
-	printf("\"stride\":%u,\"sizeimage\":%u,\"requested_fps\":%u,\"frames\":%u,",
-	       format.fmt.pix.bytesperline, format.fmt.pix.sizeimage, fps, frames);
-	printf("\"delivered_fps\":%.6f,\"max_gap_ms\":%.3f,\"timing_gaps\":%u,",
-	       measured_fps, max_gap * 1000, gaps);
-	printf("\"buffer_errors\":%u,\"sequence_gaps\":%u,\"pass\":%s}\n",
-	       bad, sequence_gaps, ret ? "false" : "true");
-	fflush(stdout);
 	goto out;
 error:
 	perror("V4L2 ioctl");
@@ -169,6 +160,15 @@ out:
 	req.count = 0;
 	if (xioctl(fd, VIDIOC_REQBUFS, &req) < 0)
 		ret = -1;
+	printf("{\"cycle\":%u,\"fourcc\":\"%.4s\",\"width\":%u,\"height\":%u,",
+	       cycle, (char *)&mode.fourcc, mode.width, mode.height);
+	printf("\"stride\":%u,\"sizeimage\":%u,\"requested_fps\":%u,\"frames\":%u,",
+	       format.fmt.pix.bytesperline, format.fmt.pix.sizeimage, fps, frames);
+	printf("\"delivered_fps\":%.6f,\"max_gap_ms\":%.3f,\"timing_gaps\":%u,",
+	       measured_fps, max_gap * 1000, gaps);
+	printf("\"buffer_errors\":%u,\"sequence_gaps\":%u,\"pass\":%s}\n",
+	       bad, sequence_gaps, ret ? "false" : "true");
+	fflush(stdout);
 	return ret;
 }
 
