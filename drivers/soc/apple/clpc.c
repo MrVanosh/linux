@@ -48,8 +48,6 @@ enum apple_clpc_rail {
 #define APPLE_CLPC_BUSY_PCT	50
 /* Time a rail keeps its last request after demand stops */
 #define APPLE_CLPC_HOLD_MS	32
-/* Time graphics stays powered without a break before it counts as GPU demand */
-#define APPLE_CLPC_GPU_SUSTAIN_MS	64
 /* Time the GPU floor stays released after the PMP last limited the DCS */
 #define APPLE_CLPC_GPU_BACKOFF_MS	1000
 
@@ -62,6 +60,8 @@ enum apple_clpc_rail {
  *	percent of its maximum frequency
  * @gpu_demand: streaming GPU work requests @gpu
  * @gpu: state of each rail for streaming GPU work
+ * @gpu_sustain_ms: time graphics stays powered without a break before it
+ *	counts as streaming, see apple_clpc_gpu_streaming(); 0 counts it at once
  * @pmp_backoff: release that GPU floor while the PMP, voter agent
  *	@pmp_agent, limits the DCS, see apple_clpc_gpu_limited()
  */
@@ -71,6 +71,7 @@ struct apple_clpc_hw {
 	u8 map[APPLE_CLPC_RAILS][APPLE_CLPC_LEVELS];
 	bool gpu_demand;
 	u8 gpu[APPLE_CLPC_RAILS];
+	unsigned int gpu_sustain_ms;
 	bool pmp_backoff;
 	unsigned int pmp_agent;
 };
@@ -246,13 +247,13 @@ static void apple_clpc_queue(struct apple_clpc *clpc, bool idle)
 }
 
 /*
- * Whether the GPU streams work: graphics has stayed powered for
- * APPLE_CLPC_GPU_SUSTAIN_MS, with no sample in between that found it off and
- * no gap in sampling long enough to have missed that. The firmware powers
- * graphics off a few milliseconds after the GPU idles, so a frame-paced load
- * such as video playback powers it up and down with each frame and does not
- * count. A failed read counts as powered, so that it cannot starve a running
- * graphics consumer.
+ * Whether the GPU streams work: graphics has stayed powered for the SoC's
+ * gpu_sustain_ms, with no sample in between that found it off and no gap in
+ * sampling long enough to have missed that. The firmware powers graphics off
+ * a few milliseconds after the GPU idles, so a frame-paced load such as video
+ * playback powers it up and down with each frame and does not count. A failed
+ * read counts as powered, so read errors alone do not end a stream that is
+ * already under way.
  */
 static bool apple_clpc_gpu_streaming(struct apple_clpc *clpc, unsigned long now)
 {
@@ -272,7 +273,7 @@ static bool apple_clpc_gpu_streaming(struct apple_clpc *clpc, unsigned long now)
 		clpc->gpu_on_since = now;
 	clpc->gpu_on = true;
 	return time_after_eq(now, clpc->gpu_on_since +
-				  msecs_to_jiffies(APPLE_CLPC_GPU_SUSTAIN_MS));
+				  msecs_to_jiffies(clpc->hw->gpu_sustain_ms));
 }
 
 /*
@@ -369,12 +370,15 @@ static int apple_clpc_status_show(struct seq_file *s, void *unused)
 			   clpc->hw->map[rail][2], clpc->hw->map[rail][3]);
 	seq_printf(s, "samples: %lu update errors: %lu\n", clpc->samples,
 		   clpc->update_errors);
-	if (clpc->gpu_pmgr)
-		seq_printf(s, "gpu: powered %u for %u ms, pmp limited %u ms ago\n",
-			   clpc->gpu_on,
-			   clpc->gpu_on ? jiffies_to_msecs(jiffies - clpc->gpu_on_since) : 0,
-			   clpc->gpu_limited ?
-			   jiffies_to_msecs(jiffies - clpc->gpu_limited_at) : 0);
+	if (clpc->gpu_pmgr) {
+		seq_printf(s, "gpu: powered %u for %u ms, pmp limited ", clpc->gpu_on,
+			   clpc->gpu_on ? jiffies_to_msecs(jiffies - clpc->gpu_on_since) : 0);
+		if (clpc->gpu_limited)
+			seq_printf(s, "%u ms ago\n",
+				   jiffies_to_msecs(jiffies - clpc->gpu_limited_at));
+		else
+			seq_puts(s, "never\n");
+	}
 	for (i = 0; i < clpc->nr_clusters; i++)
 		seq_printf(s, "cluster cpu%u: busy %u%% level %u%% -> dcs %u soc %u\n",
 			   clpc->clusters[i].policy_cpu, clpc->clusters[i].busy,
@@ -559,7 +563,7 @@ static const struct apple_clpc_hw apple_clpc_hw_t8132 = {
  * state 0, light GPU submissions take 30-50% longer than at state 3, and
  * macOS holds the fabric at its top states while such work streams. The
  * firmware powers graphics off a few milliseconds after the GPU idles, so
- * graphics that stays powered for GPU_SUSTAIN_MS marks such a stream. Loads
+ * graphics that stays powered for 64 ms marks such a stream. Loads
  * paced by frames power it up and down with each frame instead: on J700,
  * 1080p video playback and light browsing keep it powered for at most 63 ms
  * at a time, and leave the floor down. The floor is released HOLD_MS after
@@ -577,6 +581,7 @@ static const struct apple_clpc_hw apple_clpc_hw_t8140 = {
 	},
 	.gpu_demand = true,
 	.gpu = { [APPLE_CLPC_DCS] = 4, [APPLE_CLPC_SOC] = 3 },
+	.gpu_sustain_ms = 64,
 	.pmp_backoff = true,
 	.pmp_agent = 0,
 };
