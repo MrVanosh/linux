@@ -228,8 +228,9 @@ struct apple_cpu_priv {
 	/*
 	 * Lazy verification, see apple_soc_cpufreq_lazy_request(): the lock
 	 * serialises the command register, expected_pstate and
-	 * transition_failed between the scheduler's requests, the timer that
-	 * verifies them and ->target_index.
+	 * transition_failed between the scheduler's requests and the timer
+	 * that verifies them. Waited-for requests cancel the timer first and
+	 * do not take it.
 	 */
 	raw_spinlock_t lock;
 	struct hrtimer verify_timer;
@@ -427,19 +428,14 @@ static void apple_soc_cpufreq_write(struct apple_cpu_priv *priv, u64 reg,
 }
 
 /*
- * Requests the frequency table entry @index and, on a SoC that verifies
- * transitions, waits for the cluster to accept it.
+ * Requests @pstate and, on a SoC that verifies transitions, waits for the
+ * cluster to accept it, having waited for and verified the previous request.
  */
-static int apple_soc_cpufreq_request(struct cpufreq_policy *policy,
-				     unsigned int index)
+static int apple_soc_cpufreq_set_pstate(struct apple_cpu_priv *priv,
+					unsigned int pstate)
 {
-	struct apple_cpu_priv *priv = policy->driver_data;
-	unsigned int pstate = policy->freq_table[index].driver_data;
 	u64 reg;
 
-	/* OPP level is a hardware ID, not the frequency-table array index. */
-	if (pstate < priv->info->min_pstate || pstate > priv->info->max_pstate)
-		return -EINVAL;
 	if (priv->transition_failed)
 		return -EIO;
 
@@ -487,6 +483,20 @@ static int apple_soc_cpufreq_request(struct cpufreq_policy *policy,
 	return 0;
 }
 
+/* Requests the frequency table entry @index, see apple_soc_cpufreq_set_pstate(). */
+static int apple_soc_cpufreq_request(struct cpufreq_policy *policy,
+				     unsigned int index)
+{
+	struct apple_cpu_priv *priv = policy->driver_data;
+	unsigned int pstate = policy->freq_table[index].driver_data;
+
+	/* OPP level is a hardware ID, not the frequency-table array index. */
+	if (pstate < priv->info->min_pstate || pstate > priv->info->max_pstate)
+		return -EINVAL;
+
+	return apple_soc_cpufreq_set_pstate(priv, pstate);
+}
+
 /*
  * Lazy verification (lazy_verify SoCs)
  *
@@ -507,6 +517,13 @@ static int apple_soc_cpufreq_request(struct cpufreq_policy *policy,
  *
  * A failure stops all further requests, as for a request that is waited for,
  * and the timer reports it.
+ *
+ * Waited-for requests (the initial frequency check, the static governors,
+ * suspend) never run alongside fast-switch requests: the core stops a
+ * governor that switches from the scheduler first. They cancel the timer,
+ * report a failure it had yet to report and replace a pending request, see
+ * apple_soc_cpufreq_drain(); suspend first writes the pending request, see
+ * apple_soc_cpufreq_suspend().
  *
  * Called with priv->lock held.
  */
@@ -670,27 +687,69 @@ out:
 	return ret;
 }
 
+/*
+ * Stops lazy verification ahead of a waited-for request: cancels the verify
+ * timer, reports a failure it had yet to report, and drops the pending
+ * request, returning its P-state or -1. No fast-switch request runs
+ * concurrently to queue the timer again.
+ */
+static int apple_soc_cpufreq_drain(struct apple_cpu_priv *priv)
+{
+	unsigned int expected;
+	unsigned long flags;
+	bool report;
+	int pstate;
+	u64 reg;
+
+	hrtimer_cancel(&priv->verify_timer);
+
+	raw_spin_lock_irqsave(&priv->lock, flags);
+	pstate = priv->pending_pstate;
+	priv->pending_pstate = -1;
+	report = priv->failure_unreported;
+	priv->failure_unreported = false;
+	reg = priv->failure_command;
+	expected = priv->expected_pstate;
+	raw_spin_unlock_irqrestore(&priv->lock, flags);
+
+	if (report)
+		apple_soc_cpufreq_report(priv, reg, expected);
+	return pstate;
+}
+
 static int apple_soc_cpufreq_set_target(struct cpufreq_policy *policy,
 					unsigned int index)
 {
 	struct apple_cpu_priv *priv = policy->driver_data;
-	unsigned long flags;
-	int ret;
 
-	if (!priv->info->lazy_verify)
-		return apple_soc_cpufreq_request(policy, index);
+	/* A waited-for request replaces a pending one, see "Lazy verification". */
+	if (priv->info->lazy_verify)
+		apple_soc_cpufreq_drain(priv);
 
-	/*
-	 * Waited-for requests (suspend, the static governors) replace any
-	 * pending one; the lock keeps a late fast-switch request out until
-	 * this one is accepted.
-	 */
-	hrtimer_cancel(&priv->verify_timer);
-	raw_spin_lock_irqsave(&priv->lock, flags);
-	priv->pending_pstate = -1;
-	ret = apple_soc_cpufreq_request(policy, index);
-	raw_spin_unlock_irqrestore(&priv->lock, flags);
-	return ret;
+	return apple_soc_cpufreq_request(policy, index);
+}
+
+/*
+ * policy->cur holds the last fast-switch request, which on a lazy_verify SoC
+ * may still be pending, or lost to a failure that stopped requests. The core
+ * skips a suspend frequency equal to policy->cur, so settle the cluster
+ * first: write and verify the pending request, or report the failure.
+ */
+static int apple_soc_cpufreq_suspend(struct cpufreq_policy *policy)
+{
+	struct apple_cpu_priv *priv = policy->driver_data;
+
+	if (priv->info->lazy_verify) {
+		int pstate = apple_soc_cpufreq_drain(priv);
+		int ret;
+
+		ret = apple_soc_cpufreq_set_pstate(priv, pstate >= 0 ? pstate :
+						   priv->expected_pstate);
+		if (ret)
+			return ret;
+	}
+
+	return cpufreq_generic_suspend(policy);
 }
 
 static unsigned int apple_soc_cpufreq_fast_switch(struct cpufreq_policy *policy,
@@ -1307,8 +1366,11 @@ static void apple_soc_cpufreq_exit(struct cpufreq_policy *policy)
 {
 	struct apple_cpu_priv *priv = policy->driver_data;
 
-	/* The governor has stopped: no request re-arms the verify timer. */
-	hrtimer_cancel(&priv->verify_timer);
+	/*
+	 * The governor has stopped and the policy goes away: stop the verify
+	 * timer, report a failure it had yet to report, drop a pending request.
+	 */
+	apple_soc_cpufreq_drain(priv);
 	/* Drain firmware-limit updates before releasing the OPP tables. */
 	apple_fast_die_exit(priv);
 
@@ -1356,7 +1418,7 @@ static struct cpufreq_driver apple_soc_cpufreq_driver = {
 	.fast_switch	= apple_soc_cpufreq_fast_switch,
 	.register_em	= cpufreq_register_em_with_opp,
 	.set_boost	= cpufreq_boost_set_sw,
-	.suspend	= cpufreq_generic_suspend,
+	.suspend	= apple_soc_cpufreq_suspend,
 };
 
 static int __init apple_soc_cpufreq_module_init(void)
