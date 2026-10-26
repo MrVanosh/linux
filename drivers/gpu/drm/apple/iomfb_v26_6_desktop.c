@@ -81,6 +81,9 @@ static bool trampoline_passthrough_dict_v26_6(struct apple_dcp *dcp, int tag,
 	struct dcp_dict_passthrough_resp_v26_6 *resp = out;
 
 	trace_iomfb_callback(dcp, tag, "dcpep_cb_passthrough_dict");
+	dcp_trace_panel_property(dcp, tag, (const char *)req->key,
+		strnlen((const char *)req->key, sizeof(req->key)),
+		req->value_null ? NULL : req->value, sizeof(req->value));
 
 	if (!req->value_null)
 		memcpy(resp->value, req->value, sizeof(resp->value));
@@ -102,6 +105,8 @@ static bool trampoline_panel_dictionary_v26_6(struct apple_dcp *dcp, int tag,
 	int ret;
 
 	trace_iomfb_callback(dcp, tag, __func__);
+	dcp_trace_panel_property(dcp, tag, key, strnlen(key, sizeof(req->key)),
+		req->value_null ? NULL : req->value, sizeof(req->value));
 	if (!dcp_has_panel(dcp) || req->value_null ||
 	    !memchr(key, 0, sizeof(req->key)))
 		goto done;

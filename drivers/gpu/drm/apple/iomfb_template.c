@@ -1264,6 +1264,9 @@ static bool dcpep_process_chunks(struct apple_dcp *dcp,
 			dcp_property_complete(dcp->chunks.data, dcp->chunks.received,
 					      dcp->chunks.length);
 
+	dcp_trace_panel_property(dcp, 0, req->key,
+		strnlen(req->key, sizeof(req->key)), dcp->chunks.data, dcp->chunks.length);
+
 	ret = parse(dcp->chunks.data, dcp->chunks.length, &ctx);
 
 	if (ret) {

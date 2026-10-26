@@ -247,6 +247,7 @@ struct dcp_desktop_state {
 	struct dcp_display_metadata panel_metadata;
 	u64 panel_metadata_generation;
 	bool panel_metadata_valid;
+	u32 identity_log_count;
 	/* RX records an unsupported callback until the modeset RPC has drained. */
 	bool modeset_active;
 	bool modeset_callback_error;
@@ -891,5 +892,9 @@ static inline bool dcp_ext_dptx_607(const struct apple_dcp *dcp)
 }
 
 #define DCP_AUDIO_MAX_CHANS 15
+
+
+void dcp_trace_panel_property(struct apple_dcp *dcp, int tag, const char *key,
+			      size_t key_len, const void *blob, size_t len);
 
 #endif /* __APPLE_DCP_INTERNAL_H__ */

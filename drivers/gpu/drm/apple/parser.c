@@ -2003,3 +2003,61 @@ int parse_system_log_mnits(struct dcp_parse_ctx *handle, struct dcp_system_ev_mn
 
 	return 0;
 }
+
+/* Inspect structure only. Never emit a firmware value or allocate from its size. */
+static int parse_identity_tree(struct dcp_parse_ctx *ctx, dcp_identity_key_fn emit,
+                              void *data, u32 depth, u32 *budget)
+{
+	const struct dcp_parse_tag *tag;
+	u32 count;
+
+	if (!*budget || depth > 4)
+		return -E2BIG;
+	--*budget;
+	tag = parse_tag(ctx);
+	if (IS_ERR(tag))
+		return PTR_ERR(tag);
+	if (tag->type != DCP_TYPE_DICTIONARY && tag->type != DCP_TYPE_ARRAY) {
+		/* Reuse the bounded scalar decoder from the original position. */
+		ctx->pos -= sizeof(*tag);
+		return skip(ctx);
+	}
+	count = tag->size;
+	if (count > *budget)
+		return -E2BIG;
+	for (u32 i = 0; i < count; i++) {
+		struct dcp_parse_ctx value;
+		const struct dcp_parse_tag *key_tag, *value_tag;
+		const char *key = "[]";
+		u32 length = 2;
+		int ret;
+
+		if (tag->type == DCP_TYPE_DICTIONARY) {
+			key_tag = parse_tag_of_type(ctx, DCP_TYPE_STRING);
+			if (IS_ERR(key_tag))
+				return PTR_ERR(key_tag);
+			length = key_tag->size;
+			key = parse_bytes(ctx, length);
+			if (IS_ERR(key))
+				return PTR_ERR(key);
+		}
+		value = *ctx;
+		value_tag = parse_tag(&value);
+		if (IS_ERR(value_tag))
+			return PTR_ERR(value_tag);
+		emit(data, key, length, value_tag->type, value_tag->size, depth);
+		ret = parse_identity_tree(ctx, emit, data, depth + 1, budget);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
+int parse_identity_keys(const void *blob, size_t len, dcp_identity_key_fn emit, void *data)
+{
+	struct dcp_parse_ctx ctx;
+	u32 budget = 64;
+	int ret = parse(blob, len, &ctx);
+
+	return ret ?: parse_identity_tree(&ctx, emit, data, 0, &budget);
+}

@@ -1392,7 +1392,29 @@ static void parser_panel_identity_stable(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, desktop->panel_metadata.serial, 2U);
 }
 
+static void parser_identity_emit(void *data, const char *key, u32 len,
+                                 u32 type, u32 size, u32 depth)
+{
+	u32 *seen = data;
+
+	(*seen)++;
+}
+
+static void parser_identity_bounds(struct kunit *test)
+{
+	u32 seen = 0;
+	__le32 huge[] = { cpu_to_le32(0xd3), cpu_to_le32(0x01ffffff) };
+
+	KUNIT_EXPECT_EQ(test, parse_identity_keys(huge, sizeof(huge),
+			parser_identity_emit, &seen), -E2BIG);
+	KUNIT_EXPECT_EQ(test, seen, 0U);
+	for (u32 len = 0; len < sizeof(huge); len++)
+		KUNIT_EXPECT_LT(test, parse_identity_keys(huge, len,
+				parser_identity_emit, &seen), 0);
+}
+
 static struct kunit_case parser_cases[] = {
+	KUNIT_CASE(parser_identity_bounds),
 	KUNIT_CASE(parser_panel_identity_stable),
 	KUNIT_CASE(parser_panel_identity),
 	KUNIT_CASE(parser_score_presence),

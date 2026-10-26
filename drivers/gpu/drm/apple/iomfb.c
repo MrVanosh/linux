@@ -40,6 +40,47 @@
 #include "parser.h"
 #include "trace.h"
 
+/* Enable for one diagnostic boot with apple_drm.panel_identity_debug=1. */
+static bool panel_identity_debug;
+module_param(panel_identity_debug, bool, 0600);
+MODULE_PARM_DESC(panel_identity_debug, "Bounded desktop panel property keys and types (no values)");
+
+static void dcp_identity_key_log(void *data, const char *key, u32 key_len,
+                                 u32 type, u32 size, u32 depth)
+{
+	struct apple_dcp *dcp = data;
+	char safe[65];
+	u32 i;
+
+	if (dcp->desktop->identity_log_count >= 256)
+		return;
+	for (i = 0; i < min_t(u32, key_len, sizeof(safe) - 1); i++)
+		safe[i] = key[i] >= 0x20 && key[i] <= 0x7e ? key[i] : '?';
+	safe[i] = 0;
+	dcp->desktop->identity_log_count++;
+	dev_info(dcp->dev, "panel identity depth=%u key=%s type=%u size=%u\n",
+		 depth, safe, type, size);
+}
+
+void dcp_trace_panel_property(struct apple_dcp *dcp, int tag, const char *key,
+                              size_t key_len, const void *blob, size_t len)
+{
+	int ret;
+
+	if (!READ_ONCE(panel_identity_debug) ||
+	    dcp->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP ||
+	    !dcp_has_panel(dcp) || dcp->desktop->identity_log_count >= 256)
+		return;
+	dev_info(dcp->dev, "panel identity callback=D%03d bytes=%zu null=%d\n",
+		 tag, len, !blob);
+	dcp_identity_key_log(dcp, key, key_len, 0, len, 0);
+	if (!blob)
+		return;
+	ret = parse_identity_keys(blob, len, dcp_identity_key_log, dcp);
+	if (ret)
+		dev_info(dcp->dev, "panel identity inspection stopped: %d\n", ret);
+}
+
 static int dcp_tx_offset(enum dcp_context_id id)
 {
 	switch (id) {

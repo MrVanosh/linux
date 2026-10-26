@@ -60,6 +60,7 @@ def main():
         ('display', 'panel-brightness-commit', display.brightness_commit, ((),), ()),
         ('display', 'panel-brightness-takeover', display.takeover, ((),), ()),
         ('display', 'panel-mode-catalog', display.modes, ((),), ()),
+        ('display', 'desktop-identity-keys', desktop.identity_keys, ((),), ('-Wno-unused-function',)),
         ('display', 'desktop-panel-identity', lambda r: desktop.panel_identity(r, output), ((),), ()),
         ('display', 'desktop-powerlog-framing', desktop.powerlog_framing, ((),), ()),
         ('display', 'desktop-brightness-keys-reports', desktop.keys_and_reports, ((),), ()),

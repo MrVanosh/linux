@@ -635,3 +635,34 @@ int main(void)
     return 0;
 }
 '''
+
+
+def identity_keys(root):
+    import rate, struct
+    f = rate.parser_fixture(root)
+    data = bytearray(struct.pack('<I', 0xd3))
+    f['wire']({'ProductAttributes': {'ManufacturerID': 'TST', 'SerialNumber': 42},
+               'Other': [True, 7]}, data)
+    source = (root/'drivers/gpu/drm/apple/parser.c').read_text()
+    unit = f['prefix'] + f['metadata'] + f['epoch'] + f['header'] + f['edid_header'] + f['parser']
+    unit += block(source, 'static int parse_identity_tree(')
+    unit += block(source, 'int parse_identity_keys(')
+    unit += 'static const unsigned char blob[] = {' + ','.join(map(str,data)) + '};\n'
+    return unit + r'''
+static unsigned seen;
+static void emit(void *data,const char *key,u32 len,u32 type,u32 size,u32 depth)
+{
+    (void)data;(void)size;assert(len && key && depth<5);
+    assert(type==1 || type==2 || type==4 || type==9 || type==11);seen++;
+}
+int main(void)
+{
+    assert(!parse_identity_keys(blob,sizeof(blob),emit,NULL) && seen==6);
+    for(unsigned i=0;i<sizeof(blob)-4;i++) {
+        seen=0;assert(parse_identity_keys(blob,i,emit,NULL)<0);assert(seen<=6);
+    }
+    u32 huge[]={0xd3,(1U<<24)|0xffffff};
+    assert(parse_identity_keys(huge,sizeof(huge),emit,NULL)==-E2BIG);
+    return 0;
+}
+'''
