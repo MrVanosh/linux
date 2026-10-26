@@ -84,6 +84,7 @@ int main(int argc, char **argv)
     assert(!memcmp(&mode,&saved,sizeof(mode)) && generation==0);
     const u8 *raw=(const u8 *)&edid->raw;
     assert(!memcmp(raw+77,"Apple Panel",11));
+    assert(!memcmp(raw+95,"unspecified",11));
     assert((raw[66] | (raw[68]>>4)<<8)==345);
     assert((raw[67] | (raw[68]&15)<<8)==216);
     FILE *file=fopen(argv[2],"wb");assert(file);

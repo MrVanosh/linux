@@ -464,7 +464,7 @@ int main(int argc, char **argv)
             const struct drm_edid *minimal_edid=dcp_panel_edid_snapshot(&d,modes,3,&generation);
             assert(!IS_ERR(minimal_edid) && drm_edid_valid(minimal_edid));
             const u8 *m=(const void *)&minimal_edid->raw;
-            assert(!memcmp(m+72+5,"TST 002a",8) && !memcmp(m+90+5,"00000000",8));
+            assert(!memcmp(m+72+5,"TST 002a",8) && !memcmp(m+90+5,"unspecified",11));
             drm_edid_free(minimal_edid);
         }
         /* Null and unrelated setters preserve the existing ACK and identity. */

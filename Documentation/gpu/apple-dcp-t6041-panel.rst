@@ -129,7 +129,7 @@ or prevent the generic fallback from being published.
 
 If the ADT or its identity fields are absent, the desktop J616 fallback is
 manufacturer APP, product 0616, name Apple Panel and unspecified numeric
-serial zero, represented by the non-empty serial descriptor ``00000000``.
+serial zero, represented by the non-empty serial descriptor ``unspecified``.
 This generic identity does not claim to identify an individual panel. The
 preferred representable timing and range limits come from the retained DCP
 TimingElements catalog. Exact mode enumeration continues to use that catalog.

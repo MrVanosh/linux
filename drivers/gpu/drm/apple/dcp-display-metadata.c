@@ -335,7 +335,10 @@ const struct drm_edid *dcp_panel_edid(const struct dcp_display_metadata *metadat
 				metadata->name[0] ? metadata->name : name);
 	if (ret)
 		return ERR_PTR(ret);
-	snprintf(serial, sizeof(serial), "%08x", metadata->serial);
+	if (metadata->serial)
+		snprintf(serial, sizeof(serial), "%08x", metadata->serial);
+	else
+		snprintf(serial, sizeof(serial), "unspecified");
 	ret = dcp_metadata_text(&block.detailed_timings[2], EDID_DETAIL_MONITOR_SERIAL,
 				metadata->serial_text[0] ? metadata->serial_text : serial);
 	if (ret)
