@@ -91,14 +91,14 @@ static inline u64 dcpep_ack(enum dcp_context_id id)
 }
 
 /*
- * Adaptive sync through IOMFBParameter 14 black-screens the J616s panel on
- * the desktop 26.6 firmware: the firmware accepts the VRR mode, then no swap
- * completes.  Do not offer it there.
+ * The desktop 26.6 modeset programs adaptive sync only for the internal
+ * ProMotion panel (see iomfb_modeset()); offer VRR there and nowhere else.
  */
 static bool dcp_mode_vrr_supported(struct apple_dcp *dcp,
 				   const struct dcp_display_mode *mode)
 {
-	return dcp->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP || !mode->vrr;
+	return dcp->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP || !mode->vrr ||
+	       dcp->main_display;
 }
 
 /*
