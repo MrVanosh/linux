@@ -835,3 +835,69 @@ int main(void)
     return 0;
 }
 '''
+
+
+def identity_trace_budget(root):
+    source=(root/'drivers/gpu/drm/apple/iomfb.c').read_text()
+    code=r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include <string.h>
+typedef uint32_t u32;
+#define READ_ONCE(x) (x)
+#define min_t(t,a,b) ((t)(a)<(t)(b)?(t)(a):(t)(b))
+#define DCP_FIRMWARE_V_26_6_DESKTOP 5
+struct apple_dcp {int fw_compat;bool has_panel;void *dev;struct {u32 identity_log_count[4];} *desktop;};
+static bool panel_identity_debug;
+static unsigned messages;
+static char output[256];
+static bool dcp_has_panel(struct apple_dcp *d) {return d->has_panel;}
+static void dev_info(void *dev,const char *fmt,...)
+{
+    (void)dev;va_list args;va_start(args,fmt);vsnprintf(output,sizeof(output),fmt,args);va_end(args);messages++;
+}
+typedef void (*dcp_identity_key_fn)(void *,const char *,u32,u32,u32,u32);
+static int parse_identity_keys(const void *blob,size_t len,dcp_identity_key_fn emit,void *data)
+{
+    (void)blob;(void)len;
+    for(unsigned i=0;i<70;i++)emit(data,"Key\n",4,9,25,0);
+    return 0;
+}
+'''
+    code+=block(source,'struct dcp_identity_trace {')+';\n'
+    code+=block(source,'static void dcp_identity_key_log(')
+    code+=block(source,'void dcp_trace_panel_property(')
+    return code+r'''
+int main(void)
+{
+    struct apple_dcp d={.fw_compat=5,.has_panel=true};
+    __typeof__(*d.desktop) desktop={0};d.desktop=&desktop;
+    const char secret[]="SYNTHETIC_VALUE_NOT_FOR_LOGS";
+    dcp_trace_panel_property(&d,561,"Property",8,secret,sizeof(secret));assert(!messages);
+    panel_identity_debug=true;d.fw_compat=1;
+    dcp_trace_panel_property(&d,561,"Property",8,secret,sizeof(secret));assert(!messages);
+    d.fw_compat=5;d.has_panel=false;
+    dcp_trace_panel_property(&d,561,"Property",8,secret,sizeof(secret));assert(!messages);
+    d.has_panel=true;
+    for(unsigned i=0;i<100;i++)dcp_trace_panel_property(&d,114,"Statistics",10,secret,sizeof(secret));
+    assert(desktop.identity_log_count[2]==128 && !desktop.identity_log_count[0] && !desktop.identity_log_count[1]);
+    unsigned before=messages;
+    dcp_trace_panel_property(&d,552,"Panel",5,secret,sizeof(secret));assert(messages>before);
+    dcp_trace_panel_property(&d,561,"Panel",5,secret,sizeof(secret));
+    assert(desktop.identity_log_count[0] && desktop.identity_log_count[1]);
+    assert(strstr(output,"Key?") && !strstr(output,secret));
+    for(unsigned i=0;i<100;i++) {
+        dcp_trace_panel_property(&d,552,"Panel",5,secret,sizeof(secret));
+        dcp_trace_panel_property(&d,561,"Panel",5,secret,sizeof(secret));
+        dcp_trace_panel_property(&d,0,"Chunks",6,secret,sizeof(secret));
+    }
+    for(unsigned i=0;i<4;i++)assert(desktop.identity_log_count[i]==128);
+    before=messages;dcp_trace_panel_property(&d,561,"Panel",5,NULL,0);assert(messages==before);
+    assert(messages<=520);
+    return 0;
+}
+'''
