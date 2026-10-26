@@ -85,8 +85,10 @@ static bool trampoline_passthrough_dict_v26_6(struct apple_dcp *dcp, int tag,
 		strnlen((const char *)req->key, sizeof(req->key)),
 		req->value_null ? NULL : req->value, sizeof(req->value));
 
-	if (!req->value_null)
+	if (!req->value_null) {
+		dcp_panel_edid_receive(dcp, req->value, sizeof(req->value));
 		memcpy(resp->value, req->value, sizeof(resp->value));
+	}
 
 	resp->ret = false;
 	memset(resp->padding, 0, sizeof(resp->padding));
@@ -110,11 +112,8 @@ static bool trampoline_panel_dictionary_v26_6(struct apple_dcp *dcp, int tag,
 	if (!dcp_has_panel(dcp) || req->value_null ||
 	    !memchr(key, 0, sizeof(req->key)))
 		goto done;
-	/* A real EDID blob, when supplied, takes precedence over product data. */
-	if (!strcmp(key, "EDID") || !strcmp(key, "edid")) {
-		dcp_panel_edid_receive(dcp, req->value, sizeof(req->value));
-		goto done;
-	}
+	/* A real EDID may be a blob or nested in a property dictionary. */
+	dcp_panel_edid_receive(dcp, req->value, sizeof(req->value));
 	if (strcmp(key, "DisplayAttributes") && strcmp(key, "ProductAttributes"))
 		goto done;
 	ret = parse(req->value, sizeof(req->value), &ctx);

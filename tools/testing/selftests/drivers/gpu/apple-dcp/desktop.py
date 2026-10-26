@@ -380,10 +380,11 @@ def panel_identity(root, output=None):
             f['edid_header'] + f['parser'] + f['stubs'] + f['builder'])
     source = (root / 'drivers/gpu/drm/apple/dcp.c').read_text()
     helpers = '\n'.join(block(source, name) for name in (
-        'void dcp_panel_metadata_replace(', 'void dcp_panel_edid_receive(', 'bool dcp_panel_metadata_current(',
+        'void dcp_panel_metadata_replace(', 'static bool dcp_panel_edid_has_identity(', 'void dcp_panel_edid_receive(', 'bool dcp_panel_metadata_current(',
         'const struct drm_edid *dcp_panel_edid_snapshot('))
     backend = (root / 'drivers/gpu/drm/apple/iomfb_v26_6_desktop.c').read_text()
-    dictionary = block((root/'drivers/gpu/drm/apple/parser.c').read_text(), 'int parse_panel_edid_data(')
+    dictionary = block((root/'drivers/gpu/drm/apple/parser.c').read_text(), 'static int parse_panel_edid_value(')
+    dictionary += block((root/'drivers/gpu/drm/apple/parser.c').read_text(), 'int parse_panel_edid_data(')
     dictionary += block(backend, 'struct dcp_dict_passthrough_req_v26_6 {')+';\n'
     dictionary += block(backend, 'static bool trampoline_panel_dictionary_v26_6(')
     dictionary += block(backend, 'bool iomfb_check_callback_v26_6_desktop(')
@@ -487,12 +488,25 @@ int main(int argc, char **argv)
     u8 real[128];memcpy(real,bytes,128);real[12]^=1;real[127]^=1;
     dcp_panel_edid_receive(&d,real,sizeof(real));
     assert(desktop.panel_raw_edid_size==128);
+    u8 nested[148]={0};u32 word;
+    word=0xd3;memcpy(nested,&word,4);word=0x01000001;memcpy(nested+4,&word,4);
+    word=0x09000004;memcpy(nested+8,&word,4);memcpy(nested+12,"EDID",4);
+    word=0x0a000080;memcpy(nested+16,&word,4);memcpy(nested+20,real,128);
+    const u8 *nested_raw=NULL;size_t nested_size=0;
+    assert(!parse_panel_edid_data(nested,sizeof(nested),&nested_raw,&nested_size));
+    assert(nested_size==128 && !memcmp(nested_raw,real,128));
+    dcp_panel_edid_receive(&d,nested,sizeof(nested));
     generation=desktop.panel_metadata_generation;
     const struct drm_edid *copied=dcp_panel_edid_snapshot(&d,modes,3,&generation);
     assert(!IS_ERR(copied) && !memcmp(&copied->raw,real,128));drm_edid_free(copied);
     unsigned previous=notifications;
     real[127]^=1;dcp_panel_edid_receive(&d,real,sizeof(real));
     assert(notifications==previous);
+    /* A checksum-valid block with no serial must not reintroduce null strings. */
+    memset(real+12,0,4);memset(real+95,' ',13);real[127]=0;
+    for(unsigned j=0;j<127;j++)real[127]-=real[j];
+    assert(!dcp_panel_edid_has_identity(real));
+    dcp_panel_edid_receive(&d,real,sizeof(real));assert(notifications==previous);
     desktop.panel_raw_edid_size=0;notifications=1;
     drm_edid_free(edid);
     /* Repeated and partial dictionaries cannot trigger monitor/brightness restore loops. */

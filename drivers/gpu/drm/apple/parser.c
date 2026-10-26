@@ -2070,13 +2070,67 @@ int parse_identity_keys(const void *blob, size_t len, dcp_identity_key_fn emit, 
 	return parse_identity_tree(&ctx, emit, data, 0, &budget);
 }
 
-/* A setter may deliver the EDID bytes directly or as an OSSerialize blob. */
+/* Look for named EDID blobs inside bounded property dictionaries. */
+static int parse_panel_edid_value(struct dcp_parse_ctx *ctx, u32 depth, u32 *budget,
+                                 bool edid_key, const u8 **edid, size_t *size)
+{
+	const struct dcp_parse_tag *tag;
+	struct dcp_parse_ctx start = *ctx;
+
+	if (depth > 4 || !*budget)
+		return -E2BIG;
+	--*budget;
+	tag = parse_tag(ctx);
+	if (IS_ERR(tag))
+		return PTR_ERR(tag);
+	if (tag->type == DCP_TYPE_BLOB && edid_key) {
+		const u8 *data;
+
+		if (tag->size < 128 || tag->size > 4096 || tag->size % 128)
+			return -EINVAL;
+		data = parse_bytes(ctx, tag->size);
+		if (IS_ERR(data))
+			return PTR_ERR(data);
+		if (memcmp(data, "\x00\xff\xff\xff\xff\xff\xff\x00", 8) ||
+		    (1U + data[126]) * 128 != tag->size)
+			return -EINVAL;
+		*edid = data;
+		*size = tag->size;
+		return 0;
+	}
+	if (tag->type == DCP_TYPE_DICTIONARY) {
+		if (tag->size > *budget)
+			return -E2BIG;
+		for (u32 i = 0; i < tag->size; i++) {
+			const struct dcp_parse_tag *key_tag = parse_tag_of_type(ctx, DCP_TYPE_STRING);
+			const char *key;
+			bool match;
+			int ret;
+
+			if (IS_ERR(key_tag))
+				return PTR_ERR(key_tag);
+			key = parse_bytes(ctx, key_tag->size);
+			if (IS_ERR(key))
+				return PTR_ERR(key);
+			match = (key_tag->size == 4 && (!memcmp(key, "EDID", 4) ||
+				 !memcmp(key, "edid", 4))) ||
+				(key_tag->size == 13 && !memcmp(key, "IODisplayEDID", 13));
+			ret = parse_panel_edid_value(ctx, depth + 1, budget, match, edid, size);
+			if (ret != -ENOENT)
+				return ret;
+		}
+		return -ENOENT;
+	}
+	*ctx = start;
+	return skip(ctx) ?: -ENOENT;
+}
+
+/* A setter may deliver raw bytes, a blob, or a dictionary containing a blob. */
 int parse_panel_edid_data(const void *blob, size_t len, const u8 **edid, size_t *size)
 {
 	struct dcp_parse_ctx ctx;
-	const struct dcp_parse_tag *tag;
 	const u8 *data = blob;
-	u32 bytes;
+	u32 bytes, budget = 64;
 	int ret;
 
 	if (len >= 128 && !memcmp(data, "\x00\xff\xff\xff\xff\xff\xff\x00", 8)) {
@@ -2088,18 +2142,5 @@ int parse_panel_edid_data(const void *blob, size_t len, const u8 **edid, size_t 
 		return 0;
 	}
 	ret = parse(blob, len, &ctx);
-	if (ret)
-		return ret;
-	tag = parse_tag_of_type(&ctx, DCP_TYPE_BLOB);
-	if (IS_ERR(tag) || tag->size < 128 || tag->size > 4096 || tag->size % 128)
-		return -EINVAL;
-	data = parse_bytes(&ctx, tag->size);
-	if (IS_ERR(data))
-		return PTR_ERR(data);
-	if (memcmp(data, "\x00\xff\xff\xff\xff\xff\xff\x00", 8) ||
-	    (1U + data[126]) * 128 != tag->size)
-		return -EINVAL;
-	*edid = data;
-	*size = tag->size;
-	return 0;
+	return ret ?: parse_panel_edid_value(&ctx, 0, &budget, true, edid, size);
 }

@@ -867,6 +867,37 @@ void dcp_panel_metadata_replace(struct apple_dcp *dcp,
 		dcp_queue_hotplug(dcp->connector);
 }
 
+/* A checksum alone does not guarantee usable userspace identity strings. */
+static bool dcp_panel_edid_has_identity(const u8 *raw)
+{
+	u16 vendor = (u16)raw[8] << 8 | raw[9];
+	bool model = raw[10] || raw[11];
+	bool serial = raw[12] || raw[13] || raw[14] || raw[15];
+
+	for (u32 shift = 0; shift <= 10; shift += 5)
+		if (!((vendor >> shift) & 31) || ((vendor >> shift) & 31) > 26)
+			return false;
+	for (u32 offset = 54; offset <= 108; offset += 18) {
+		const u8 *desc = raw + offset;
+		bool text = false;
+
+		if (desc[0] || desc[1] || desc[2] || desc[4])
+			continue;
+		for (u32 i = 5; i < 18 && desc[i] != '\n'; i++) {
+			if (desc[i] < 0x20 || desc[i] > 0x7e) {
+				text = false;
+				break;
+			}
+			text |= desc[i] != ' ';
+		}
+		if (desc[3] == EDID_DETAIL_MONITOR_NAME)
+			model |= text;
+		if (desc[3] == EDID_DETAIL_MONITOR_SERIAL)
+			serial |= text;
+	}
+	return model && serial;
+}
+
 /* Preserve a validated real EDID ahead of any metadata-derived fallback. */
 void dcp_panel_edid_receive(struct apple_dcp *dcp, const void *blob, size_t len)
 {
@@ -882,7 +913,7 @@ void dcp_panel_edid_receive(struct apple_dcp *dcp, const void *blob, size_t len)
 	edid = drm_edid_alloc(raw, size);
 	if (!edid)
 		return;
-	if (!drm_edid_valid(edid)) {
+	if (!drm_edid_valid(edid) || !dcp_panel_edid_has_identity(raw)) {
 		drm_edid_free(edid);
 		return;
 	}

@@ -85,7 +85,10 @@ are never printed. Each property walk stops at depth 4 or 64 objects, and the
 DCP stops after 256 key records, with bounded framing/status lines in addition.
 The switch defaults off. Malformed serialization only stops inspection.
 
-A valid real EDID delivered under ``EDID`` or ``edid`` has priority. Without
+A real EDID with a usable identity takes priority. It may arrive as raw bytes,
+a serialized blob, or an ``EDID``, ``edid`` or ``IODisplayEDID`` blob nested
+in a dictionary. Checksum-valid blocks without a usable manufacturer, model
+and serial are rejected so they cannot reintroduce null userspace strings. Without
 one, ProductAttributes remain usable, but are no longer a prerequisite for
 publishing an identity. The fallback reads the original ADT from m1n1's
 reserved-memory ``phram`` node with ``label = "adt"``. The reader accepts at
