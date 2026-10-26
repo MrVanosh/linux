@@ -50,6 +50,8 @@ enum apple_clpc_rail {
 #define APPLE_CLPC_HOLD_MS	32
 /* Time graphics stays powered without a break before it counts as GPU demand */
 #define APPLE_CLPC_GPU_SUSTAIN_MS	64
+/* Time the GPU floor stays released after the PMP last limited the DCS */
+#define APPLE_CLPC_GPU_BACKOFF_MS	1000
 
 /**
  * struct apple_clpc_hw - per-SoC CLPC parameters
@@ -58,12 +60,17 @@ enum apple_clpc_rail {
  *	0 or 1 for the first
  * @map: state of each rail for a busy cluster below 25, 50, 75 and 100
  *	percent of its maximum frequency
+ * @gpu_demand: streaming GPU work requests both rails' top states
+ * @pmp_backoff: release that GPU floor while the PMP, voter agent
+ *	@pmp_agent, limits the DCS, see apple_clpc_gpu_limited()
  */
 struct apple_clpc_hw {
 	unsigned int rail[APPLE_CLPC_RAILS];
 	unsigned int sustain;
 	u8 map[APPLE_CLPC_RAILS][APPLE_CLPC_LEVELS];
 	bool gpu_demand;
+	bool pmp_backoff;
+	unsigned int pmp_agent;
 };
 
 struct apple_clpc_cluster {
@@ -107,6 +114,9 @@ struct apple_clpc {
 	bool gpu_on;
 	unsigned long gpu_on_since;
 	unsigned long gpu_sampled;
+	/* Whether, and when, the PMP last limited the DCS while GPU work streamed */
+	bool gpu_limited;
+	unsigned long gpu_limited_at;
 };
 
 /* cpufreq policies can appear after probe; pick up new ones as they do. */
@@ -263,6 +273,32 @@ static bool apple_clpc_gpu_streaming(struct apple_clpc *clpc, unsigned long now)
 				  msecs_to_jiffies(APPLE_CLPC_GPU_SUSTAIN_MS));
 }
 
+/*
+ * Whether the PMP holds the GPU to a power budget: while GPU work streams, it
+ * votes the DCS below the top state, which it does under sustained heavy
+ * rendering but not for streams of light submissions. The GPU floor would
+ * then only take power and thermal headroom from the GPU, so it stays
+ * released for GPU_BACKOFF_MS after the PMP last did so.
+ */
+static bool apple_clpc_gpu_limited(struct apple_clpc *clpc, unsigned long now)
+{
+	unsigned int rail = clpc->hw->rail[APPLE_CLPC_DCS];
+	unsigned int dcs;
+
+	if (!clpc->hw->pmp_backoff)
+		return false;
+
+	dcs = (apple_pmc_floor_read(clpc->pmc, clpc->hw->pmp_agent) >>
+	       APPLE_PMC_RAIL_SHIFT(rail)) & 0xf;
+	if (dcs < clpc->hw->map[APPLE_CLPC_DCS][APPLE_CLPC_LEVELS - 1]) {
+		clpc->gpu_limited = true;
+		clpc->gpu_limited_at = now;
+	}
+	return clpc->gpu_limited &&
+	       time_before(now, clpc->gpu_limited_at +
+				msecs_to_jiffies(APPLE_CLPC_GPU_BACKOFF_MS));
+}
+
 static void apple_clpc_sample(struct apple_clpc *clpc)
 {
 	unsigned int demand[APPLE_CLPC_RAILS] = {};
@@ -284,7 +320,8 @@ static void apple_clpc_sample(struct apple_clpc *clpc)
 		for (rail = 0; rail < APPLE_CLPC_RAILS; rail++)
 			demand[rail] = max(demand[rail], cl->request[rail]);
 	}
-	if (clpc->gpu_pmgr && apple_clpc_gpu_streaming(clpc, now))
+	if (clpc->gpu_pmgr && apple_clpc_gpu_streaming(clpc, now) &&
+	    !apple_clpc_gpu_limited(clpc, now))
 		for (rail = 0; rail < APPLE_CLPC_RAILS; rail++)
 			demand[rail] = clpc->hw->map[rail][APPLE_CLPC_LEVELS - 1];
 
@@ -331,8 +368,11 @@ static int apple_clpc_status_show(struct seq_file *s, void *unused)
 	seq_printf(s, "samples: %lu update errors: %lu\n", clpc->samples,
 		   clpc->update_errors);
 	if (clpc->gpu_pmgr)
-		seq_printf(s, "gpu: powered %u for %u ms\n", clpc->gpu_on,
-			   clpc->gpu_on ? jiffies_to_msecs(jiffies - clpc->gpu_on_since) : 0);
+		seq_printf(s, "gpu: powered %u for %u ms, pmp limited %u ms ago\n",
+			   clpc->gpu_on,
+			   clpc->gpu_on ? jiffies_to_msecs(jiffies - clpc->gpu_on_since) : 0,
+			   clpc->gpu_limited ?
+			   jiffies_to_msecs(jiffies - clpc->gpu_limited_at) : 0);
 	for (i = 0; i < clpc->nr_clusters; i++)
 		seq_printf(s, "cluster cpu%u: busy %u%% level %u%% -> dcs %u soc %u\n",
 			   clpc->clusters[i].policy_cpu, clpc->clusters[i].busy,
@@ -521,6 +561,10 @@ static const struct apple_clpc_hw apple_clpc_hw_t8132 = {
  * 1080p video playback and light browsing keep it powered for at most 63 ms
  * at a time, and leave the floor down. The floor is released HOLD_MS after
  * graphics powers off.
+ *
+ * The PMP (agent 0) votes the DCS to its top state for streams of light GPU
+ * submissions, and lowers it under sustained heavy rendering, which needs
+ * neither rail's floor; see apple_clpc_gpu_limited().
  */
 static const struct apple_clpc_hw apple_clpc_hw_t8140 = {
 	.rail = { [APPLE_CLPC_DCS] = 0, [APPLE_CLPC_SOC] = 1 },
@@ -529,6 +573,8 @@ static const struct apple_clpc_hw apple_clpc_hw_t8140 = {
 		[APPLE_CLPC_SOC] = { 0, 0, 0, 3 },
 	},
 	.gpu_demand = true,
+	.pmp_backoff = true,
+	.pmp_agent = 0,
 };
 
 /*
