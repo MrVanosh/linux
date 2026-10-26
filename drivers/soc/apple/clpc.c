@@ -60,7 +60,8 @@ enum apple_clpc_rail {
  *	0 or 1 for the first
  * @map: state of each rail for a busy cluster below 25, 50, 75 and 100
  *	percent of its maximum frequency
- * @gpu_demand: streaming GPU work requests both rails' top states
+ * @gpu_demand: streaming GPU work requests @gpu
+ * @gpu: state of each rail for streaming GPU work
  * @pmp_backoff: release that GPU floor while the PMP, voter agent
  *	@pmp_agent, limits the DCS, see apple_clpc_gpu_limited()
  */
@@ -69,6 +70,7 @@ struct apple_clpc_hw {
 	unsigned int sustain;
 	u8 map[APPLE_CLPC_RAILS][APPLE_CLPC_LEVELS];
 	bool gpu_demand;
+	u8 gpu[APPLE_CLPC_RAILS];
 	bool pmp_backoff;
 	unsigned int pmp_agent;
 };
@@ -290,7 +292,7 @@ static bool apple_clpc_gpu_limited(struct apple_clpc *clpc, unsigned long now)
 
 	dcs = (apple_pmc_floor_read(clpc->pmc, clpc->hw->pmp_agent) >>
 	       APPLE_PMC_RAIL_SHIFT(rail)) & 0xf;
-	if (dcs < clpc->hw->map[APPLE_CLPC_DCS][APPLE_CLPC_LEVELS - 1]) {
+	if (dcs < clpc->hw->gpu[APPLE_CLPC_DCS]) {
 		clpc->gpu_limited = true;
 		clpc->gpu_limited_at = now;
 	}
@@ -323,7 +325,7 @@ static void apple_clpc_sample(struct apple_clpc *clpc)
 	if (clpc->gpu_pmgr && apple_clpc_gpu_streaming(clpc, now) &&
 	    !apple_clpc_gpu_limited(clpc, now))
 		for (rail = 0; rail < APPLE_CLPC_RAILS; rail++)
-			demand[rail] = clpc->hw->map[rail][APPLE_CLPC_LEVELS - 1];
+			demand[rail] = max(demand[rail], clpc->hw->gpu[rail]);
 
 	for (rail = 0; rail < APPLE_CLPC_RAILS; rail++)
 		state[rail] = apple_clpc_vote(&clpc->vote[rail], demand[rail],
@@ -544,12 +546,13 @@ static const struct apple_clpc_hw apple_clpc_hw_t8132 = {
 		[APPLE_CLPC_SOC] = { 3, 3, 3, 3 },
 	},
 	.gpu_demand = true,
+	.gpu = { [APPLE_CLPC_DCS] = 5, [APPLE_CLPC_SOC] = 3 },
 };
 
 /*
  * T8140: DCS states 0-4 on rail 0, fabric states 0-3 on rail 1. A busy
- * cluster raises the DCS one state per frequency quartile; only a cluster
- * at its top quartile also raises the fabric.
+ * cluster raises the DCS one state per frequency quartile and leaves the
+ * fabric alone.
  *
  * GPU work needs both rails at their top states: the GPU firmware takes up
  * and completes every command over the fabric. With the fabric left at
@@ -570,9 +573,10 @@ static const struct apple_clpc_hw apple_clpc_hw_t8140 = {
 	.rail = { [APPLE_CLPC_DCS] = 0, [APPLE_CLPC_SOC] = 1 },
 	.map = {
 		[APPLE_CLPC_DCS] = { 1, 2, 3, 4 },
-		[APPLE_CLPC_SOC] = { 0, 0, 0, 3 },
+		[APPLE_CLPC_SOC] = { 0, 0, 0, 0 },
 	},
 	.gpu_demand = true,
+	.gpu = { [APPLE_CLPC_DCS] = 4, [APPLE_CLPC_SOC] = 3 },
 	.pmp_backoff = true,
 	.pmp_agent = 0,
 };
