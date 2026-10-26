@@ -1203,6 +1203,15 @@ int dcp_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_commit *commi
 	    crtc_state->vrr_enabled)
 		return -EINVAL;
 
+	/* The desktop 26.6 firmware applies adaptive sync with a mode set. */
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP && crtc_state->enable) {
+		struct drm_crtc_state *old =
+			drm_atomic_get_old_crtc_state(commit, crtc);
+
+		if (old && old->vrr_enabled != crtc_state->vrr_enabled)
+			crtc_state->mode_changed = true;
+	}
+
 	/* DRM core only caps the blob size; the gamma update copies a full table. */
 	if (crtc_state->color_mgmt_changed && crtc_state->gamma_lut &&
 	    drm_color_lut_size(crtc_state->gamma_lut) != dcp_gamma_lut_size(pdev))

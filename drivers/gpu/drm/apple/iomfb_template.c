@@ -2927,10 +2927,7 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 		.timing_mode_id = mode->timing_mode_id
 	};
 
-	/*
-	 * Suspected VRR modes need swap timestamps, see iomfb_flush().
-	 * Adaptive sync itself stays off, see dcp_mode_vrr_supported().
-	 */
+	/* VRR modes need swap timestamps, see iomfb_flush(). */
 	dcp->use_timestamps = mode->vrr;
 
 	/*
@@ -2971,7 +2968,23 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 			 modeset->bootstrap.timing_mode_id);
 	}
 
-	dcp_modeset_select(dcp, NULL, cookie);
+	/*
+	 * The internal ProMotion panel takes adaptive sync (IOMFBParameter 14,
+	 * minimum rate in 16.16 Hz, 0 = off) before the mode is selected; the
+	 * firmware then reports the mode set with VRR on.
+	 */
+	if (mode->vrr && dcp->main_display) {
+		struct dcp_set_parameter_dcp param = {
+			.param = IOMFBPARAM_ADAPTIVE_SYNC,
+			.value = { crtc_state->vrr_enabled ? mode->min_vrr : 0 },
+			.count = 3,
+		};
+
+		dcp_set_parameter_dcp(dcp, false, &param, dcp_modeset_select,
+				      cookie);
+	} else {
+		dcp_modeset_select(dcp, NULL, cookie);
+	}
 
 	/*
 	 * The DCP firmware has an internal timeout of ~8 seconds for
