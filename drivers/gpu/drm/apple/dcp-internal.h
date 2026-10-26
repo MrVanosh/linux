@@ -248,7 +248,7 @@ struct dcp_desktop_state {
 	struct dcp_display_metadata panel_adt_identity;
 	u64 panel_metadata_generation;
 	bool panel_metadata_valid;
-	u32 identity_log_count;
+	u32 identity_log_count[4];
 	u8 panel_raw_edid[4096];
 	size_t panel_raw_edid_size;
 	/* RX records an unsupported callback until the modeset RPC has drained. */

@@ -45,19 +45,25 @@ static bool panel_identity_debug;
 module_param(panel_identity_debug, bool, 0600);
 MODULE_PARM_DESC(panel_identity_debug, "Bounded desktop panel property keys and types (no values)");
 
+struct dcp_identity_trace {
+	struct apple_dcp *dcp;
+	u32 *count;
+};
+
 static void dcp_identity_key_log(void *data, const char *key, u32 key_len,
 				 u32 type, u32 size, u32 depth)
 {
-	struct apple_dcp *dcp = data;
+	struct dcp_identity_trace *trace = data;
+	struct apple_dcp *dcp = trace->dcp;
 	char safe[65];
 	u32 i;
 
-	if (dcp->desktop->identity_log_count >= 256)
+	if (*trace->count >= 128)
 		return;
 	for (i = 0; i < min_t(u32, key_len, sizeof(safe) - 1); i++)
 		safe[i] = key[i] >= 0x20 && key[i] <= 0x7e ? key[i] : '?';
 	safe[i] = 0;
-	dcp->desktop->identity_log_count++;
+	++*trace->count;
 	dev_info(dcp->dev, "panel identity depth=%u key=%s type=%u size=%u\n",
 		 depth, safe, type, size);
 }
@@ -65,18 +71,24 @@ static void dcp_identity_key_log(void *data, const char *key, u32 key_len,
 void dcp_trace_panel_property(struct apple_dcp *dcp, int tag, const char *key,
 			      size_t key_len, const void *blob, size_t len)
 {
+	struct dcp_identity_trace trace;
+	u32 slot = tag == 552 ? 0 : tag == 561 ? 1 : tag == 114 ? 2 : 3;
 	int ret;
 
 	if (!READ_ONCE(panel_identity_debug) ||
-	    dcp->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP ||
-	    !dcp_has_panel(dcp) || dcp->desktop->identity_log_count >= 256)
+	    dcp->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP || !dcp_has_panel(dcp))
+		return;
+	trace.dcp = dcp;
+	trace.count = &dcp->desktop->identity_log_count[slot];
+	/* Periodic statistics cannot consume the panel setters' budget. */
+	if (*trace.count >= 128)
 		return;
 	dev_info(dcp->dev, "panel identity callback=D%03d bytes=%zu null=%d\n",
 		 tag, len, !blob);
-	dcp_identity_key_log(dcp, key, key_len, 0, len, 0);
+	dcp_identity_key_log(&trace, key, key_len, 0, len, 0);
 	if (!blob)
 		return;
-	ret = parse_identity_keys(blob, len, dcp_identity_key_log, dcp);
+	ret = parse_identity_keys(blob, len, dcp_identity_key_log, &trace);
 	if (ret)
 		dev_info(dcp->dev, "panel identity inspection stopped: %d\n", ret);
 }

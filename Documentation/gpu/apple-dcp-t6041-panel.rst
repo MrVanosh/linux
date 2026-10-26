@@ -82,7 +82,9 @@ D114 and chunked property delivery report the outer key, serialized key names,
 value type numbers and lengths. D000 identifies chunked delivery. Type numbers
 are dictionary 1, array 2, integer 4, string 9, blob 10 and boolean 11. Values
 are never printed. Each property walk stops at depth 4 or 64 objects, and the
-DCP stops after 256 key records, with bounded framing/status lines in addition.
+DCP stops after 128 key records per callback class (512 total), with bounded
+framing/status lines in addition. D552, D561, D114 and chunked delivery have
+separate budgets so periodic statistics cannot hide the panel setters.
 The switch defaults off. Malformed serialization only stops inspection.
 
 A real EDID with a usable identity takes priority. It may arrive as raw bytes,
