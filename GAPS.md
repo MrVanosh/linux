@@ -47,6 +47,36 @@ parity. There are no J616s results for this series yet.
 | M5 Pro comparison | No M5 Pro hardware configuration exists in this public baseline | No T605x/G17S KMD path to compare | No claim of M5 parity | Pinned public tree contains T6040 and T8140; a licensed public M5 Pro reference is required |
 | CTS and Linux/macOS performance ratio | Hardware results belong to their exact kernel/Mesa pair | No result for this candidate | Pending hardware agent | Run gpubench with matching suite, configuration and conditions; review CTS failures and kernel faults before claiming parity |
 
+## Remaining 25G83 facts and recovery qualification
+
+No firmware capability is inferred from another GPU's successful CTS result.
+The following are the exact T6040/25G83 facts needed to open the remaining
+paths. A reference capture of achieved frequency establishes a target, not
+an offset, voltage, descriptor ABI, or Linux residency measurement.
+
+| Gated path | Exact facts needed for T6040/25G83 | Current evidence and disposition |
+| --- | --- | --- |
+| Sustained top clock | DT OPP count, both voltage lanes, hardware A/B selector maps, selected logical-state limit; independently decoded achieved frequency or residency, counter units/timebase/wrap, request versus achieved-state semantics and limiting reason under sustained load | Per-chip DT handoff and maps are already mandatory; both maps select the final raw OPP. `max_frequency_khz` is an advertised maximum, not achieved telemetry. G17 `stats_snapshot()` returns None; ring drain alone proves no residency. Keep voltages/maps unchanged and require a measured Linux load trace. |
+| Raw versus logical state count | Meaning of the ADT count properties for this firmware, both SGX map banks and number of entries actually consumed by the 25G83 power tables | Public `HwData25G83`, calibration validation and loader handoff select eleven logical states from sixteen raw OPPs. Do not resize the firmware structure from the ADT property name or discard its unsorted OPPs. Compare actual top selection and achieved clock. |
+| DVFS ramp / idle / fast-die | 25G83 meaning and units of ramp/effort controls, idle/off delays, temperature limits and hysteresis; PMP/AP/CLPC request ownership, achieved floors and release under idle and load | Existing shared submission/idle policy, DT suppliers and T6040 power-state graph are enabled. Power-state presence is not proof of load tracking. Require live requests, actual floor release and thermal traces; opaque power words are not tunable parameters. |
+| Recovery slot attribution | Exact 25G83 slot-key storage range, lifetime, cache policy and slot stride; key QID/stamp bit fields; slot-mask meanings, progress monitor semantics and association with an actual started render | `recovery_slot_keys=None`; never copy T8140's physical address. Preserve firmware blame. Progress-view reads no longer depend on knowing the key address; bounded diagnostics report unknown ownership explicitly. |
+| Recovery table / reason | 25G83 recovery-info offset/extent, valid/guilty/cancelled bits, stamp sequence encoding; reason-code semantics; ordering and reset of records relative to states 1/2/3/0; interrupted-command drain and visibility guarantees | Existing checked 256-entry table and handshake remain unchanged. Reason 3 is treated as page fault by existing attribution. New generation/slot diagnostics aid qualification; missing key evidence cannot clear blame. An aged compute record may no longer substitute for a stamp across recovery. |
+| Compute completion / visibility | Exact compute record identity and timestamp fields, stamp write/cache-maintenance order, ring consumption during restart, late/missing-stamp behavior and a release witness for interrupted work | Same-generation 50 ms fallback retained. Crossing recovery now requires a covering stamp for ordinary retirement; quarantine, kill/drain and processor-stop ownership remain. A completion record plus elapsed time after restart is not independent visibility evidence. |
+| MMIO pair registration | 25G83 MMIO port addresses and access-power witness; pair registration write order, ACK and coexistence with lead commands/bootstrap QID reservation | Keep disabled. The 26A428 sequence, POWER_ON_DONE message and recovery-target pointer are distinct ABI facts. |
+| MCache | 25G83 table-entry format, sizes/alignment, descriptor pointers and enable bits, ownership/coherency rules, partial-render/restart behavior | Keep disabled until a licensed public implementation or independently supplied facts establish the whole contract and tests validate it. |
+| Few-primitives | T6040 enable-bit semantics, required auxiliary buffer sizes/registers and partial-store/load/resume handling for all tiling/fragment paths | Keep disabled; previously observed hangs are not grounds to enable it for performance. |
+| Ray traversal / preemption | T6040 register program, scratch sizing/alignment by enabled cores/clusters, saved operand-state layout, resume/checkpoint semantics, kill/restart contract, scheduler timer mask and priority profiles | Existing two-by-ten operand layout and priorities retained; periodic timer mask remains zero on both variants. Native traversal remains disabled pending bounded execution/fault/recovery qualification. |
+| TLB range operations | T6040 opcode/operand encoding, VA/ASID granules, ordering, completion and negative-translation invalidation across every mapping alias | Existing page TLBI and PoC table cleaning retained. Copying Neo range encoding cannot close a performance gap safely. |
+| Large vertex/barrier and tess/geometry faults | Faulting engine/access/VA/VM, exact bound intervals/backings and mapping lifetime; render/compute descriptor identity, TVB/GTP capacities, pass-start/stamp state and recovery reason before acknowledgment | Isolate exact public CTS names with one process and compare kernels with the same Mesa. Buffer size alone does not establish VM-bind, timeout or TVB causality. Retention fix is independently justified, not a claim to have cured a CTS fault. |
+
+The compute stamp-wait KUnit suite now checks that an aged exact record and
+consumed items cannot retire a pre-recovery kick without its stamp, while an
+exact/later stamp, busy-ring control and same-generation fallback retain their
+expected behavior. Recovery-source tests cover unknown keys, incomplete reads
+and page-fault fallback. Diagnostic counters explicitly identify lifetime
+stampless totals; they are not a count of commands retired by one restart.
+
+
 ## Source and validation boundaries
 
 The implementation references are the licensed public Aurora/Asahi kernel and
