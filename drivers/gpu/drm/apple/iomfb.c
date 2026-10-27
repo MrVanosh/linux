@@ -1221,10 +1221,12 @@ void dcp_hotplug(struct work_struct *work)
 		 * callback has completed.
 		 */
 		ret = dcp_retrain_active_crtc(connector);
-		if (ret)
+		if (ret) {
 			dev_warn(dcp->dev,
 				 "failed to retrain active CRTC after hotplug: %d\n",
 				 ret);
+			dcp_link_recovery_schedule(dcp);
+		}
 	}
 
 	dcp_test_point(dcp, DCP_TEST_HOTPLUG_EVENT);

@@ -3025,6 +3025,8 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 						mode->min_vrr : 0);
 		if (ret != -EOPNOTSUPP) {
 			dcp->desktop->mode_live = !ret;
+			if (!ret)
+				atomic_inc(&dcp->modesets_done);
 			return ret;
 		}
 	}
@@ -3116,6 +3118,8 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 	kref_put(&cookie->refcount, release_wait_cookie);
 
 	dcp->desktop->mode_live = !ret;
+	if (!ret)
+		atomic_inc(&dcp->modesets_done);
 	return ret;
 }
 #else

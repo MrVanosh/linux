@@ -2328,6 +2328,43 @@ out_unlock:
 	mutex_unlock(&dcp->hpd_mutex);
 }
 
+#define DCP_LINK_RECOVERY_TRIES		4
+#define DCP_LINK_RECOVERY_DELAY_MS	2000
+
+/*
+ * A retrain after a hotplug found no mode for the active CRTC: the sink's
+ * EDID was incomplete (it had just woken from sleep and listed only its base
+ * modes).  Nothing re-reads it until the next HPD event, which can be a
+ * minute away, so a Type-C display stays at a fallback mode.  Connect the
+ * link again, as a replug does, unless a mode set completed in between.
+ */
+void dcp_link_recovery_schedule(struct apple_dcp *dcp)
+{
+	if (dcp->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP || dcp->main_display ||
+	    !dcp_is_typec_output(dcp) || !READ_ONCE(dcp->typec_cable_connected) ||
+	    dcp->link_recovery_tries >= DCP_LINK_RECOVERY_TRIES)
+		return;
+	dcp->link_recovery_snap = atomic_read(&dcp->modesets_done);
+	mod_delayed_work(system_freezable_wq, &dcp->link_recovery_wq,
+			 msecs_to_jiffies(DCP_LINK_RECOVERY_DELAY_MS));
+}
+
+static void dcp_link_recovery_work(struct work_struct *work)
+{
+	struct apple_dcp *dcp = container_of(to_delayed_work(work),
+					     struct apple_dcp, link_recovery_wq);
+	struct platform_device *pdev = to_platform_device(dcp->dev);
+
+	if (!READ_ONCE(dcp->typec_cable_connected) ||
+	    atomic_read(&dcp->modesets_done) != dcp->link_recovery_snap)
+		return;
+	dev_info(dcp->dev, "link recovery %u: connecting again after a retrain that found no mode\n",
+		 ++dcp->link_recovery_tries);
+	dcp_dptx_disconnect_oob(pdev, 0);
+	msleep(500);
+	dcp_dptx_connect_oob(pdev, 0);
+}
+
 static void dcp_typec_reconnect_work(struct work_struct *work)
 {
 	struct apple_dcp *dcp =
@@ -4411,6 +4448,7 @@ VISIBLE_IF_KUNIT void dcp_disable_typec_work(struct apple_dcp *dcp, bool release
 	cancel_delayed_work_sync(&dcp->external_stop_retry_wq);
 	disable_delayed_work_sync(&dcp->hdmi_settle_wq);
 	disable_delayed_work_sync(&dcp->hdmi_recheck_wq);
+	disable_delayed_work_sync(&dcp->link_recovery_wq);
 	dcp_hdmi_disable(dcp);
 }
 
@@ -4424,6 +4462,7 @@ VISIBLE_IF_KUNIT void dcp_enable_typec_work(struct apple_dcp *dcp)
 	enable_delayed_work(&dcp->announce_wq);
 	enable_delayed_work(&dcp->hdmi_settle_wq);
 	enable_delayed_work(&dcp->hdmi_recheck_wq);
+	enable_delayed_work(&dcp->link_recovery_wq);
 	dcp_hdmi_enable(dcp);
 	scoped_guard(mutex, &dcp->hpd_mutex)
 		dcp->typec_work_enabled = true;
@@ -5255,6 +5294,7 @@ static int dcp_platform_probe_pipe(struct platform_device *pdev)
 	init_completion(&dcp->typec_iomfb_hpd_ready);
 	INIT_DELAYED_WORK(&dcp->typec_reconnect_wq,
 			  dcp_typec_reconnect_work);
+	INIT_DELAYED_WORK(&dcp->link_recovery_wq, dcp_link_recovery_work);
 	INIT_DELAYED_WORK(&dcp->placeholder_edid_wq,
 			  dcp_placeholder_edid_work);
 	INIT_DELAYED_WORK(&dcp->typec_relink_wq, dcp_typec_relink_work);
@@ -5272,6 +5312,7 @@ static int dcp_platform_probe_pipe(struct platform_device *pdev)
 	disable_delayed_work(&dcp->placeholder_edid_wq);
 	disable_delayed_work(&dcp->typec_relink_wq);
 	disable_delayed_work(&dcp->announce_wq);
+	disable_delayed_work(&dcp->link_recovery_wq);
 	dcp->announce.stopped = true;
 	/*
 	 * A native external pipe's bind enables these; firmware callbacks may
@@ -6001,6 +6042,7 @@ static int dcp_platform_resume(struct device *dev)
 	if (READ_ONCE(dcp->ext_dead))
 		return 0;
 
+	dcp->link_recovery_tries = 0;
 	dcp_release_after_sleep(dcp);
 	dcp_enable_typec_work(dcp);
 	/* The HDMI output's PHY and crossbar may have lost their setup in sleep. */

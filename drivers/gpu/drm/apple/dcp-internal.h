@@ -715,6 +715,15 @@ struct apple_dcp {
 	struct dcp_fabric_presence hdmi_presence;
 	/* The state before the current series of HPD edges began. */
 	enum dcp_fabric_presence_state hdmi_presence_prev;
+	/*
+	 * A desktop 26.x Type-C display that came back from system sleep with a
+	 * partial mode list (the sink was not ready for its EDID yet) is
+	 * connected again after a retrain found no mode.
+	 */
+	struct delayed_work link_recovery_wq;
+	unsigned int link_recovery_tries;
+	unsigned int link_recovery_snap;
+	atomic_t modesets_done;
 	unsigned long hdmi_edge_jiffies;
 	bool hdmi_edge_seen;
 	struct delayed_work hdmi_settle_wq;
