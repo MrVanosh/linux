@@ -2631,6 +2631,8 @@ int dcp_dptx_disconnect(struct apple_dcp *dcp, u32 port)
 	if (!ret)
 		WRITE_ONCE(dcp->dptxport[port].tile_hint, false);
 	mutex_unlock(&dcp->hpd_mutex);
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP && !port)
+		dcp_peer_release_26_6(dcp);
 
 	return ret;
 }
@@ -4829,6 +4831,7 @@ static int dcp_comp_bind(struct device *dev, struct device *main, void *data)
 
 	if (READ_ONCE(dcp->ext_dead))
 		return 0;
+	dcp_peer_bound_26_6(dcp);
 	ret = dcp_comp_bind_pipe(dev, main, data);
 	if (ret && dcp->ext_failsafe) {
 		dcp_ext_give_up(dcp, ret, "bind");

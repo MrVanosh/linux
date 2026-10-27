@@ -159,5 +159,7 @@ void dcp_peer_swap_submit_26_6(struct apple_dcp *dcp,
 			       u32 swap_id);
 bool dcp_peer_swap_complete_26_6(struct apple_dcp *dcp, u32 swap_id);
 int dcp_peer_stop_26_6(struct apple_dcp *dcp);
+void dcp_peer_release_26_6(struct apple_dcp *dcp);
+void dcp_peer_bound_26_6(struct apple_dcp *dcp);
 
 #endif

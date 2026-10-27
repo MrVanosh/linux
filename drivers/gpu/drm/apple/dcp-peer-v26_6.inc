@@ -118,6 +118,36 @@ static int dcp_peer_call_oob(struct apple_dcp *dcp, const char *tag,
 
 /* ---- peer release / forget ---- */
 
+/*
+ * The primary's display is gone (cable removed, port moved, system sleep):
+ * give the reserved peer back.  A merged pair is stopped first; a pair that
+ * still runs is kept.  The next allocation reserves a peer again.  Without
+ * this the peer stays marked as an owner's peer after its port was taken by
+ * another display, and swap_complete would discard that display's own swaps.
+ */
+void dcp_peer_release_26_6(struct apple_dcp *dcp)
+{
+	guard(mutex)(&dcp_peer_lock);
+	if (dcp->peer_reserved) {
+		struct apple_dcp *peer = dcp->peer_reserved;
+
+		if (dcp->peer_tiling.vftg || dcp->peer_tiling.member ||
+		    peer->peer_tiling.vftg || peer->peer_tiling.member)
+			return;
+		memset(&dcp->peer_tiling, 0, sizeof(dcp->peer_tiling));
+		memset(&peer->peer_tiling, 0, sizeof(peer->peer_tiling));
+		peer->peer_owner = NULL;
+		dcp->peer_reserved = NULL;
+		dcp->peer_active = false;
+	}
+}
+
+void dcp_peer_bound_26_6(struct apple_dcp *dcp)
+{
+	guard(mutex)(&dcp_peer_lock);
+	dcp->peer_unbinding = false;
+}
+
 static void dcp_peer_forget(struct apple_dcp *dcp)
 {
 	guard(mutex)(&dcp_peer_lock);
@@ -971,7 +1001,8 @@ void dcp_peer_swap_submit_26_6(struct apple_dcp *dcp,
  */
 bool dcp_peer_swap_complete_26_6(struct apple_dcp *dcp, u32 swap_id)
 {
-	if (!READ_ONCE(dcp->peer_owner))
+	/* Only a peer without a display of its own: its swaps are the pair's. */
+	if (!READ_ONCE(dcp->peer_owner) || READ_ONCE(dcp->active_typec_route))
 		return false;
 	WRITE_ONCE(dcp->last_swap_id, swap_id);
 	WRITE_ONCE(dcp->have_swap_complete, true);
