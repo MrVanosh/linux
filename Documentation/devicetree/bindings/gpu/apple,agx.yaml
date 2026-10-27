@@ -73,7 +73,6 @@ properties:
       - enum: [globals, fw-data, fw-text]
 
   apple,idle-off-delay-ms:
-    $ref: /schemas/types.yaml#/definitions/uint32
     minimum: 2
     maximum: 1000
     default: 2
