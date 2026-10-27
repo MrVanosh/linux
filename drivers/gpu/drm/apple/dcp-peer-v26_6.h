@@ -4,6 +4,7 @@
 
 #include <linux/types.h>
 #include <linux/kernel.h>
+#include <linux/stddef.h>
 #include <linux/unaligned.h>
 
 struct dcp_peer_tiling {
@@ -78,9 +79,12 @@ static inline bool dcp_peer_tiling_set(struct dcp_peer_tiling *own,
 struct dcp_display_hints {
 	u8 hints[0x6c];
 	u8 padding[4];
-	__le32 primary_id, peer_id;
-	u8 extra_pipes, flags;
-	u8 allocation_reserved[22];
+	/* The allocation the AP fills in, or clears when it allocates no peer. */
+	struct_group_attr(allocation, __packed,
+		__le32 primary_id, peer_id;
+		u8 extra_pipes, flags;
+		u8 allocation_reserved[22];
+	);
 	__le32 status;
 	u8 tail[12];
 } __packed;
@@ -88,6 +92,7 @@ struct dcp_display_hints {
 static_assert(sizeof(struct dcp_display_hints) == 160);
 static_assert(offsetof(struct dcp_display_hints, primary_id) == 0x70);
 static_assert(offsetof(struct dcp_display_hints, status) == 0x90);
+static_assert(sizeof_field(struct dcp_display_hints, allocation) == 32);
 
 /* The widest mode one desktop 26.6 DISPEXT pipe drives (firmware: "max width: 6720"). */
 #define DCP_DESKTOP_PIPE_MAX_WIDTH	6720
