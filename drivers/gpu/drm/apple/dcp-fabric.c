@@ -413,7 +413,7 @@ static int dcp_typec_route_activate(struct apple_dcp_typec_route *route,
 		return ret;
 
 	if (dcp->fixed_route_selected) {
-		ret = mux_control_deselect(dcp->xbar);
+		ret = mux_control_deselect(dcp->fixed_xbar);
 		dcp->fixed_route_selected = false;
 		if (ret)
 			return ret;
@@ -433,15 +433,22 @@ static int dcp_typec_route_activate(struct apple_dcp_typec_route *route,
 		ret = dcp_dpxbar_tunnel_select_source(xbar, route->mux_index);
 		if (ret == -EOPNOTSUPP)
 			ret = 0;
-	} else {
-		ret = xbar == route->xbar ?
-			mux_control_select(xbar, route->mux_index) : 0;
+	} else if (xbar == route->xbar) {
+		/*
+		 * The control is only ever held by a route of this port, which
+		 * lets it go under the fabric lock held here: waiting for it
+		 * would wait for good, with the port controller's update work
+		 * and its interrupt stuck behind us.
+		 */
+		ret = mux_control_try_select(xbar, route->mux_index);
+		if (ret == -EBUSY)
+			dev_err(dcp->dev, "Type-C crossbar control still held, route not taken\n");
 	}
 	if (ret) {
-		if (dcp->xbar) {
+		if (dcp->fixed_xbar) {
 			int restore_ret;
 
-			restore_ret = mux_control_select(dcp->xbar,
+			restore_ret = mux_control_select(dcp->fixed_xbar,
 							 dcp->fixed_mux_index);
 			if (!restore_ret)
 				dcp->fixed_route_selected = true;
@@ -627,8 +634,10 @@ static int dcp_typec_route_deactivate(struct apple_dcp_typec_route *route)
 			dcp->phy = dcp->fixed_phy;
 			dcp->dptx_phy = dcp->fixed_dptx_phy;
 
-			if (dcp->xbar && !dcp->fixed_route_selected) {
-				ret = mux_control_select(dcp->xbar,
+			if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP)
+				WRITE_ONCE(dcp->xbar, dcp->fixed_xbar);
+			if (dcp->fixed_xbar && !dcp->fixed_route_selected) {
+				ret = mux_control_select(dcp->fixed_xbar,
 							 dcp->fixed_mux_index);
 				if (ret)
 					return ret;
@@ -945,10 +954,10 @@ static void dcp_fixed_hdmi_reinit_locked(struct apple_dcp *dcp, const char *why)
 		if (ret)
 			dev_warn(dcp->dev, "HDMI: PHY not set up again: %d\n", ret);
 	}
-	if (dcp->xbar && dcp->fixed_route_selected && !dcp->active_typec_route) {
+	if (dcp->fixed_xbar && dcp->fixed_route_selected && !dcp->active_typec_route) {
 		scoped_guard(mutex, &dcp->tb_lock)
 			dcp->direct_xbar_up = NULL;
-		ret = mux_control_deselect(dcp->xbar);
+		ret = mux_control_deselect(dcp->fixed_xbar);
 		dcp->fixed_route_selected = false;
 		if (!ret)
 			ret = dcp_fixed_output_select(dcp);
@@ -1917,7 +1926,7 @@ int dcp_direct_crossbar_link(struct apple_dcp *dcp, bool up)
 	if (route && !route->tunnel && route->selected)
 		xbar = route->active_xbar ?: route->xbar;
 	else if (!route && dcp->fixed_route_selected)
-		xbar = dcp->xbar;
+		xbar = dcp->fixed_xbar;
 	/* A deselected output went idle, and its clocks with it. */
 	if (dcp->direct_xbar_up && dcp->direct_xbar_up != xbar)
 		dcp->direct_xbar_up = NULL;
@@ -3811,10 +3820,13 @@ static void dcp_fixed_restore_phy(void *ctx)
 static int dcp_fixed_select_mux(void *ctx)
 {
 	struct apple_dcp *dcp = ctx;
-	int ret = mux_control_select(dcp->xbar, dcp->fixed_mux_index);
+	int ret = mux_control_select(dcp->fixed_xbar, dcp->fixed_mux_index);
 
-	if (!ret)
+	if (!ret) {
 		dcp->fixed_route_selected = true;
+		if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP)
+			WRITE_ONCE(dcp->xbar, dcp->fixed_xbar);
+	}
 	return ret;
 }
 
@@ -3827,7 +3839,7 @@ static int dcp_fixed_output_select(struct apple_dcp *dcp)
 {
 	lockdep_assert_held(&dcp_typec_fabric_lock);
 	return dcp_fabric_run_fixed(!!dcp->fixed_phy, !!dcp->active_typec_route,
-				    dcp->xbar && !dcp->fixed_route_selected,
+				    dcp->fixed_xbar && !dcp->fixed_route_selected,
 				    &dcp_fixed_ops, dcp);
 }
 
