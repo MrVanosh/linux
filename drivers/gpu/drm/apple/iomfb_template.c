@@ -3086,9 +3086,13 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 		return -ENOMEM;
 	cookie = &modeset->wait;
 	modeset->actual = dcp->mode;
-	modeset->program_sync = dcp_has_panel(dcp) && dcp->main_display &&
-		(dcp_desktop_vrr_supported(dcp) || dcp->vrr_enabled ||
-		 READ_ONCE(dcp->desktop->vrr_failed));
+	modeset->program_sync =
+		(dcp_has_panel(dcp) && dcp->main_display &&
+		 (dcp_desktop_vrr_supported(dcp) || dcp->vrr_enabled ||
+		  READ_ONCE(dcp->desktop->vrr_failed))) ||
+		(!dcp->main_display &&
+		 (mode->vrr || dcp->vrr_enabled ||
+		  READ_ONCE(dcp->desktop->vrr_failed)));
 	modeset->vrr = modeset->program_sync && mode->vrr &&
 		       crtc_state->vrr_enabled && dcp_desktop_vrr_supported(dcp);
 	modeset->min_vrr = mode->min_vrr;

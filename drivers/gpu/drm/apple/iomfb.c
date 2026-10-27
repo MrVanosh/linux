@@ -204,9 +204,15 @@ static inline u64 dcpep_ack(enum dcp_context_id id)
 
 bool dcp_desktop_vrr_supported(struct apple_dcp *dcp)
 {
-	return dcp->panel.has_vrr && dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP &&
-		dcp_has_panel(dcp) && dcp->main_display &&
-		!READ_ONCE(dcp->desktop->vrr_failed);
+	if (dcp->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP ||
+	    READ_ONCE(dcp->desktop->vrr_failed))
+		return false;
+
+	/* External processors advertise VRR on their sink modes, not a panel. */
+	if (!dcp->main_display)
+		return !dcp_has_panel(dcp);
+
+	return dcp_has_panel(dcp) && dcp->panel.has_vrr;
 }
 
 int dcp_desktop_vrr_check(struct apple_dcp *dcp, struct drm_crtc_state *state)
