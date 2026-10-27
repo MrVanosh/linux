@@ -450,9 +450,11 @@ static int dcp_typec_route_activate(struct apple_dcp_typec_route *route,
 
 			restore_ret = mux_control_select(dcp->fixed_xbar,
 							 dcp->fixed_mux_index);
-			if (!restore_ret)
+			if (!restore_ret) {
 				dcp->fixed_route_selected = true;
-			else
+				if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP)
+					WRITE_ONCE(dcp->xbar, dcp->fixed_xbar);
+			} else
 				dev_err(dcp->dev,
 					"failed to restore fixed display route: %d\n",
 					restore_ret);
@@ -646,6 +648,9 @@ static int dcp_typec_route_deactivate(struct apple_dcp_typec_route *route)
 		} else {
 			dcp->phy = dcp->typec_routes[0].phy;
 			dcp->dptx_phy = dcp->typec_routes[0].dptx_phy;
+			/* The released route's control may go to another pipeline. */
+			if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP)
+				WRITE_ONCE(dcp->xbar, NULL);
 		}
 	} else {
 		/*
@@ -1555,6 +1560,10 @@ static int dcp_typec_route_set(struct typec_mux_dev *mux,
 	port->applied_conf = dp_conf;
 	/* Failed route acquisition must remain retryable on the next update. */
 	port->applied_valid = false;
+
+	/* did the pairing pass count this port's direct stream so far? */
+	was_counted = port->dp_wanted && port->dp_hpd;
+
 	/* Keep a direct route until DCP acknowledges release of its display. */
 	if (!hpd && port->owner && !port->owner->tunnel) {
 		struct apple_dcp *dcp = port->owner->dcp;
@@ -1577,16 +1586,23 @@ static int dcp_typec_route_set(struct typec_mux_dev *mux,
 		if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP) {
 			port->preferred_route = port->owner;
 			port->hpd = false;
+			/*
+			 * Not waiting for a pipeline either until HPD returns:
+			 * the pipeline just freed must not route this port again.
+			 */
+			port->dp_hpd = false;
 			ret = dcp_typec_route_deactivate(port->owner);
 			if (ret)
 				return ret;
 			port->owner = NULL;
+
+			/* The hybrid went back to a live HDMI display. */
+			if (dcp->hdmi_hpd && dcp->active &&
+			    gpiod_get_value_cansleep(dcp->hdmi_hpd))
+				dcp_dptx_connect(dcp, 0);
 			dcp_typec_pipeline_freed();
 		}
 	}
-
-	/* did the pairing pass count this port's direct stream so far? */
-	was_counted = port->dp_wanted && port->dp_hpd;
 
 	if (!is_dp) {
 		port->dp_wanted = false;
