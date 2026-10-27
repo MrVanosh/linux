@@ -1936,5 +1936,6 @@ int main(void)
 """
 
     desktop = (root / "drivers/gpu/drm/apple/iomfb_v26_6_desktop.c").read_text()
-    checker = block(desktop, 'bool iomfb_check_callback_v26_6_desktop(')
-    return prefix + checker + source[start:end] + suffix
+    checker = block(desktop, 'static bool iomfb_check_callback_exact_v26_6_desktop(')
+    alias = '\n#define iomfb_check_callback_v26_6_desktop iomfb_check_callback_exact_v26_6_desktop\n'
+    return prefix + checker + alias + source[start:end] + suffix

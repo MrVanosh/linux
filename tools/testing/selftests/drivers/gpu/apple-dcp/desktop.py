@@ -389,7 +389,8 @@ def panel_identity(root, output=None):
     dictionary += block((root/'drivers/gpu/drm/apple/parser.c').read_text(), 'int parse_panel_edid_data(')
     dictionary += block(backend, 'struct dcp_dict_passthrough_req_v26_6 {')+';\n'
     dictionary += block(backend, 'static bool trampoline_panel_dictionary_v26_6(')
-    dictionary += block(backend, 'bool iomfb_check_callback_v26_6_desktop(')
+    dictionary += block(backend, 'static bool iomfb_check_callback_exact_v26_6_desktop(')
+    dictionary += '\n#define iomfb_check_callback_v26_6_desktop iomfb_check_callback_exact_v26_6_desktop\n'
     bindings = '\n'.join(line for line in block(backend, 'static const iomfb_cb_handler cb_handlers[').splitlines()
                          if '[413]' in line or '[552]' in line or '[561]' in line)
     unit = code + r'''

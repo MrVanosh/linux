@@ -132,7 +132,7 @@ done:
 	return true;
 }
 
-bool iomfb_check_callback_v26_6_desktop(int tag, u32 in_len, u32 out_len)
+static bool iomfb_check_callback_exact_v26_6_desktop(int tag, u32 in_len, u32 out_len)
 {
 	switch (tag) {
 	case 201:
@@ -311,6 +311,7 @@ static const struct dcp_cb_min_v26_6_desktop cb_min[IOMFB_MAX_CB] = {
 	[134] = CB_MIN(0, sizeof(u32)),
 	[201] = CB_MIN(sizeof(struct dcp_map_buf_req),
 		       sizeof(struct DCP_FW_NAME(dcp_map_buf_resp))),
+	[202] = CB_MIN(sizeof(struct dcp_unmap_buf_req_v26_6), 0),
 	[206] = CB_MIN(0, sizeof(u8)),
 	[207] = CB_MIN(0, sizeof(u8)),
 	[208] = CB_MIN(0, 0),
@@ -328,6 +329,9 @@ static const struct dcp_cb_min_v26_6_desktop cb_min[IOMFB_MAX_CB] = {
 	[415] = CB_MIN(0, sizeof(u8)),
 	[451] = CB_MIN(sizeof(struct dcp_allocate_buffer_req),
 		       sizeof(struct dcp_allocate_buffer_resp)),
+	[452] = CB_MIN(sizeof(struct dcp_map_physical_req),
+		       sizeof(struct dcp_map_physical_resp)),
+	[454] = CB_MIN(sizeof(u32), sizeof(u32)),
 	[552] = CB_MIN(0, sizeof(u8)),
 	[561] = CB_MIN(0, sizeof(u8)),
 	[563] = CB_MIN(0, sizeof(u8)),
@@ -339,6 +343,7 @@ static const struct dcp_cb_min_v26_6_desktop cb_min[IOMFB_MAX_CB] = {
 	[576] = CB_MIN(0, 0),
 	[581] = CB_MIN(0, 0),
 	[582] = CB_MIN(0, sizeof(u8)),
+	[588] = CB_MIN(0, 0),
 	[590] = CB_MIN(sizeof(struct DCP_FW_NAME(dc_swap_complete_resp)), 0),
 	[592] = CB_MIN(sizeof(dcp_swap_intent_t), 0),
 	[593] = CB_MIN(sizeof(u32), 0),
@@ -354,7 +359,8 @@ bool iomfb_check_callback_v26_6_desktop(int tag, u32 in_len, u32 out_len)
 {
 	if (tag < 0 || tag >= IOMFB_MAX_CB || !cb_min[tag].valid)
 		return false;
-	return in_len >= cb_min[tag].in_len && out_len >= cb_min[tag].out_len;
+	return in_len >= cb_min[tag].in_len && out_len >= cb_min[tag].out_len &&
+	       iomfb_check_callback_exact_v26_6_desktop(tag, in_len, out_len);
 }
 
 void DCP_FW_NAME(iomfb_start)(struct apple_dcp *dcp)
