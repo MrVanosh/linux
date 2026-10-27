@@ -63,7 +63,7 @@ struct Binding { context: Arc<Context> }
 }
 #[derive(Clone, Copy)] struct Cursors { count: u32, producer: u32, consumer: u32 }
 ''' + proof + r'''
-mod retirement { pub(crate) use super::quarantined_retired; }
+mod retirement { pub(crate) use super::{quarantined_retired, stamp_newer}; }
 struct Graph { cursors: Cursors, stamp: u32, fail: bool, resets: usize, owner: u64 }
 impl Graph {
     fn set_owner(&mut self, context: &Context) -> Result { if self.fail { Err(EIO) } else { self.owner = context.id; Ok(()) } }
