@@ -272,9 +272,11 @@ int dcp_peer_hints_26_6(struct apple_dcp *dcp, struct dptx_port *port,
 		}
 		if (!peer) {
 			dev_info(dcp->dev, "no idle peer pipe for a %u px display\n", width);
+			WRITE_ONCE(dcp->peer_starved, !!READ_ONCE(dcp->active_typec_route));
 			memset(&r->primary_id, 0, 32);
 			return 0;
 		}
+		WRITE_ONCE(dcp->peer_starved, false);
 		dcp->peer_reserved = peer;
 		peer->peer_owner = dcp;
 		dev_info(dcp->dev, "reserved peer %s endpoint %u for %ux%u\n",

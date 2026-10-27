@@ -2010,24 +2010,36 @@ static int dcp_desktop_dptx_disconnect_oob(struct apple_dcp *dcp, u32 port)
 }
 
 /*
- * HDMI HPD of a desktop 26.x external processor.  A disconnect is left to
- * the firmware, which detects it itself.  A cold plug after boot finds the
- * port connected without a sink: the firmware never saw this HPD, so pulse
- * the AP-asserted HPD to make it export the modes now.
+ * HDMI HPD of a desktop 26.x external processor.  A cold plug after boot
+ * finds the port connected without a sink: the firmware never saw this HPD,
+ * so pulse the AP-asserted HPD to make it export the modes now.  An unplug
+ * is reported by nothing else: the DP-to-HDMI converter keeps its DP link
+ * up without a sink and the firmware sees no change.
  */
 irqreturn_t dcp_desktop_dp2hdmi_hpd(struct apple_dcp *dcp)
 {
 	struct dptx_port *dptx = &dcp->dptxport[0];
-	bool connected = gpiod_get_value_cansleep(dcp->hdmi_hpd);
+	bool connected;
 	int ret;
 
-	if (connected) {
-		msleep(500);
-		connected = gpiod_get_value_cansleep(dcp->hdmi_hpd);
-	}
+	msleep(500);
+	connected = gpiod_get_value_cansleep(dcp->hdmi_hpd);
 	dev_dbg(dcp->dev, "DP2HDMI HPD irq, connected:%d after 500 ms\n", connected);
-	if (!connected)
+	if (!connected) {
+		if (!READ_ONCE(dcp->active_typec_route) && dcp->connector &&
+		    READ_ONCE(dcp->connector->connected)) {
+			dev_info(dcp->dev, "HDMI display unplugged\n");
+			disconnected_hpd_event(dcp->connector);
+			dcp_dptx_disconnect(dcp, 0);
+			dcp_fabric_hdmi_unplugged(dcp);
+		}
 		return IRQ_HANDLED;
+	}
+	/* The pipeline drives a Type-C display: the HDMI display waits for it. */
+	if (READ_ONCE(dcp->active_typec_route)) {
+		dev_info(dcp->dev, "HDMI display waits: its pipeline drives a Type-C display\n");
+		return IRQ_HANDLED;
+	}
 
 	mutex_lock(&dcp->hpd_mutex);
 	if (dptx_service_available(dptx) && dptx->connected &&

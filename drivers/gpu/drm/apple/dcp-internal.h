@@ -293,6 +293,11 @@ struct apple_dcp {
 	 */
 	struct apple_dcp *peer_reserved;
 	struct apple_dcp *peer_owner;
+	/*
+	 * This pipeline's Type-C display is wider than one pipe and found no
+	 * peer above it: it needs the hybrid, which was taken when it came.
+	 */
+	bool peer_starved;
 	struct dcp_peer_tiling peer_tiling;
 	bool peer_unbinding;
 	/* Firmware display endpoint (its Disp_Index), apple,dcp-endpoint;
