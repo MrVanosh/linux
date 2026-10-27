@@ -207,6 +207,9 @@ static const char *const gate_hdmi_nodes[] = {
 	"/iommu@3a2340000",
 	"/iommu@3a2300000",
 	"/mailbox@3a2e08000",
+	"/dcp@3a2e00000/typec-routes/route@0",
+	"/dcp@3a2e00000/typec-routes/route@1",
+	"/dcp@3a2e00000/typec-routes/route@2",
 	"/dcp@3a2e00000",
 };
 

@@ -214,6 +214,14 @@ properties:
     $ref: /schemas/types.yaml#/definitions/uint32
     description: Display coprocessor index on multi-DCP systems.
 
+  apple,dcp-endpoint:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description:
+      The display endpoint this coprocessor is to its firmware (its display
+      index), by which two external pipes name each other when a display
+      wider than one pipe is driven by two of them. 0 is the internal
+      display.
+
   apple,dptx-phy:
     $ref: /schemas/types.yaml#/definitions/uint32
     description: DisplayPort transmitter PHY selector.
