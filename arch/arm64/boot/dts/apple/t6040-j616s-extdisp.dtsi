@@ -75,6 +75,8 @@
 		apple,bw-scratch = <&pmgr_dcp 0 4 0x28000>;
 		/* firmware Disp_Index, the dual-pipe endpoint ID */
 		apple,dcp-endpoint = <1>;
+		/* the only pipe that can be the primary of a two-pipe display */
+		apple,typec-hybrid-first;
 		status = "disabled";
 
 		dispext0_piodma: piodma {

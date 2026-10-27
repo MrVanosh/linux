@@ -143,6 +143,8 @@ unsigned int apple_j613_25g83_clock_hz(void);
 /* A J613, or a J615 whose boot loader carries the experimental opt-in. */
 bool apple_t8122_25g83_board(void);
 
+void dcp_typec_hybrid_first_dt(void);
+
 /* Desktop 26.6 dual-pipe peer (dcp-peer-v26_6.inc, included from dcp.c) */
 struct dptx_port;
 int dcp_peer_hints_26_6(struct apple_dcp *dcp, struct dptx_port *port,

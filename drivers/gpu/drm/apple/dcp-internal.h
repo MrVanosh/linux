@@ -713,6 +713,8 @@ struct apple_dcp {
 	/* Hardirq, resume and expiry share one generation under this lock. */
 	spinlock_t hdmi_presence_lock;
 	struct dcp_fabric_presence hdmi_presence;
+	/* The state before the current series of HPD edges began. */
+	enum dcp_fabric_presence_state hdmi_presence_prev;
 	unsigned long hdmi_edge_jiffies;
 	bool hdmi_edge_seen;
 	struct delayed_work hdmi_settle_wq;

@@ -5247,6 +5247,8 @@ static int dcp_platform_probe_pipe(struct platform_device *pdev)
 	dcp->connector_type = dcp->fixed_connector_type;
 	of_property_read_u32(dev->of_node, "apple,dcp-index", &dcp->index);
 	of_property_read_u32(dev->of_node, "apple,dcp-endpoint", &dcp->peer_endpoint);
+	if (of_property_read_bool(dev->of_node, "apple,typec-hybrid-first"))
+		dcp_typec_hybrid_first_dt();
 	of_property_read_u32(dev->of_node, "apple,dptx-phy", &dcp->dptx_phy);
 	of_property_read_u32(dev->of_node, "apple,dptx-die", &dcp->dptx_die);
 	dcp->fixed_dptx_phy = dcp->dptx_phy;

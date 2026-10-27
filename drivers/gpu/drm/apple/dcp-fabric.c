@@ -50,6 +50,19 @@ module_param(typec_follow_crtc, bool, 0444);
 static bool typec_hybrid_first;
 module_param(typec_hybrid_first, bool, 0644);
 MODULE_PARM_DESC(typec_hybrid_first, "Type-C ports take the hybrid (HDMI) pipeline first (dual-pipe primary)");
+
+/* Set by a pipeline whose device tree asks for it (apple,typec-hybrid-first). */
+static bool typec_hybrid_first_dt;
+
+void dcp_typec_hybrid_first_dt(void)
+{
+	WRITE_ONCE(typec_hybrid_first_dt, true);
+}
+
+static bool dcp_typec_hybrid_first(void)
+{
+	return READ_ONCE(typec_hybrid_first) || READ_ONCE(typec_hybrid_first_dt);
+}
 MODULE_PARM_DESC(typec_follow_crtc,
 		 "Let direct DP-alt routes follow their selected CRTC (default: on)");
 
@@ -206,7 +219,7 @@ static bool dcp_typec_route_available(struct apple_dcp_typec_route *route)
 	};
 
 	struct dcp_fabric_policy policy = { .dual_stream = dcp_typec_ordered_dual_stream(),
-					    .hybrid_first = typec_hybrid_first };
+					    .hybrid_first = dcp_typec_hybrid_first() };
 
 	pipeline.presence = dcp_hdmi_presence(route->dcp);
 	return dcp_fabric_available(&pipeline, &policy);
@@ -740,6 +753,8 @@ static u64 dcp_hdmi_edge(struct apple_dcp *dcp)
 	if (!dcp_hdmi_settle_enabled(dcp))
 		return 0;
 	spin_lock_irqsave(&dcp->hdmi_presence_lock, flags);
+	if (dcp->hdmi_presence.state != DCP_FABRIC_SETTLING)
+		dcp->hdmi_presence_prev = dcp->hdmi_presence.state;
 	generation = dcp_fabric_presence_edge(&dcp->hdmi_presence, jiffies,
 					      msecs_to_jiffies(DCP_HDMI_HOLD_MS));
 	spin_unlock_irqrestore(&dcp->hdmi_presence_lock, flags);
@@ -776,6 +791,17 @@ static bool dcp_hdmi_sample(struct apple_dcp *dcp, u64 generation, int level)
 	accepted = dcp_fabric_presence_sample(&dcp->hdmi_presence, generation,
 					      level > 0, jiffies,
 					      msecs_to_jiffies(DCP_HDMI_HOLD_MS));
+	/*
+	 * The debounce guards against a glitch after an unplug.  A sample that
+	 * finds no sink where there was none before (start-up, and the sample
+	 * after system sleep) has nothing to debounce: the pipeline is free
+	 * now, not ten seconds later, when a Type-C port has already been
+	 * planned or moved onto another pipeline.
+	 */
+	if (accepted && level == 0 && dcp->hdmi_presence_prev == DCP_FABRIC_ABSENT) {
+		dcp->hdmi_presence.state = DCP_FABRIC_ABSENT;
+		dcp->hdmi_presence.deadline = 0;
+	}
 	spin_unlock_irqrestore(&dcp->hdmi_presence_lock, flags);
 	dcp_hdmi_schedule(dcp);
 	return accepted;
@@ -854,6 +880,7 @@ void dcp_fabric_init(struct apple_dcp *dcp)
 {
 	spin_lock_init(&dcp->hdmi_presence_lock);
 	dcp->hdmi_presence.state = DCP_FABRIC_ABSENT;
+	dcp->hdmi_presence_prev = DCP_FABRIC_ABSENT;
 	INIT_DELAYED_WORK(&dcp->hdmi_settle_wq, dcp_hdmi_settle_work);
 	INIT_DELAYED_WORK(&dcp->hdmi_recheck_wq, dcp_hdmi_recheck_work);
 	disable_delayed_work(&dcp->hdmi_settle_wq);
@@ -1082,7 +1109,7 @@ dcp_typec_free_route(struct apple_dcp_typec_port *port)
 	struct dcp_fabric_policy policy = {
 		.dual_stream = dcp_typec_ordered_dual_stream(),
 		.follow = dcp_typec_port_follows(port),
-		.hybrid_first = typec_hybrid_first,
+		.hybrid_first = dcp_typec_hybrid_first(),
 	};
 
 	dcp_fabric_snapshot_port(port, false);
@@ -2059,7 +2086,7 @@ static int dcp_tb_candidate(void *data)
 		struct dcp_fabric_policy policy = {
 			.dual_stream = dcp_typec_ordered_dual_stream(),
 			.follow = dcp_typec_port_follows(port),
-			.hybrid_first = typec_hybrid_first,
+			.hybrid_first = dcp_typec_hybrid_first(),
 		};
 		struct dcp_fabric_route *chosen;
 		bool connector_present = dpin ? !!port->secondary_connector : !!port->connector;
@@ -2792,7 +2819,7 @@ static int dcp_typec_follow_decide(struct apple_dcp *dcp, struct drm_crtc *crtc,
 				   struct dcp_typec_follow *follow)
 {
 	struct dcp_fabric_policy policy = { .dual_stream = dcp_typec_ordered_dual_stream(),
-					    .hybrid_first = typec_hybrid_first };
+					    .hybrid_first = dcp_typec_hybrid_first() };
 	struct apple_dcp_typec_route *from, *to, *holder, *back = NULL;
 	struct apple_dcp_typec_port *port, *other = NULL;
 	bool secondary, off = false;
