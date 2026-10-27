@@ -72,6 +72,13 @@ properties:
       - enum: [hw-cal-b, fw-text, l2-pagetables]
       - enum: [globals, fw-data, fw-text]
 
+  apple,clpc:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: |
+      Host performance controller receiving GPU submission and idle demand.
+      GFX supplier power cannot represent GPU work on firmware that keeps
+      its coprocessor domain powered while the cores are idle.
+
   apple,idle-off-delay-ms:
     minimum: 2
     maximum: 1000

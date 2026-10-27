@@ -617,6 +617,7 @@
 		reg-names = "asc", "sgx";
 		mboxes = <&gfx_mbox>;
 		power-domains = <&pmp_gfx>;
+		apple,clpc = <&clpc>;
 		status = "disabled";
 	};
 
@@ -1025,7 +1026,7 @@
 		clpc: performance-controller@1 {
 			compatible = "apple,t6041-clpc";
 			reg = <1>;
-			apple,gpu-power-state = <&ps_gfx>;
+
 		};
 	};
 
