@@ -165,7 +165,7 @@ int apple_clpc_gpu_get(struct device *dev, struct apple_clpc_gpu **out)
 	np = of_parse_phandle(dev->of_node, "apple,clpc", 0);
 	if (!np)
 		return of_find_property(dev->of_node, "apple,clpc", NULL) ? -EINVAL : 0;
-	if (!of_device_is_compatible(np, "apple,t6040-clpc")) {
+	if (!of_device_is_compatible(np, "apple,t6041-clpc")) {
 		of_node_put(np);
 		return -EINVAL;
 	}
@@ -516,7 +516,7 @@ static int apple_clpc_probe(struct platform_device *pdev)
 	/* T6040 firmware keeps GFX powered for its whole lifetime. A separate
 	 * host publication/idle input, not that supplier state, drives demand.
 	 */
-	if (of_device_is_compatible(dev->of_node, "apple,t6040-clpc")) {
+	if (of_device_is_compatible(dev->of_node, "apple,t6041-clpc")) {
 		clpc->gpu = kzalloc_obj(*clpc->gpu);
 		if (!clpc->gpu)
 			return -ENOMEM;
@@ -682,6 +682,61 @@ static const struct apple_clpc_hw apple_clpc_hw_t6040 = {
 	.sustain = 3,
 	.gpu_demand = false,
 };
+
+#if IS_BUILTIN(CONFIG_KUNIT) && !defined(MODULE)
+#include <kunit/test.h>
+
+static void apple_clpc_gpu_request_lifetime_test(struct kunit *test)
+{
+	struct apple_clpc_gpu *gpu = kzalloc_obj(*gpu);
+	u64 updated, sequence;
+
+	KUNIT_ASSERT_NOT_NULL(test, gpu);
+	kref_init(&gpu->ref);
+	spin_lock_init(&gpu->lock);
+	KUNIT_EXPECT_FALSE(test, apple_clpc_gpu_active(gpu, &updated, &sequence));
+	KUNIT_EXPECT_EQ(test, sequence, 0ull);
+	/* Provider and one consumer own independent references. */
+	kref_get(&gpu->ref);
+	apple_clpc_gpu_set_active(gpu, true);
+	KUNIT_EXPECT_TRUE(test, apple_clpc_gpu_active(gpu, &updated, &sequence));
+	KUNIT_EXPECT_GT(test, updated, 0ull);
+	KUNIT_EXPECT_EQ(test, sequence, 1ull);
+	apple_clpc_gpu_put(gpu);
+	KUNIT_EXPECT_FALSE(test, apple_clpc_gpu_active(gpu, &updated, &sequence));
+	KUNIT_EXPECT_EQ(test, sequence, 2ull);
+	kref_put(&gpu->ref, apple_clpc_gpu_free);
+}
+
+static void apple_clpc_gpu_provider_removal_test(struct kunit *test)
+{
+	struct apple_clpc_gpu *gpu = kzalloc_obj(*gpu);
+	u64 updated, sequence;
+
+	KUNIT_ASSERT_NOT_NULL(test, gpu);
+	kref_init(&gpu->ref);
+	spin_lock_init(&gpu->lock);
+	kref_get(&gpu->ref);
+	/* Provider removal must not leave a late consumer with freed storage. */
+	kref_put(&gpu->ref, apple_clpc_gpu_free);
+	apple_clpc_gpu_set_active(gpu, true);
+	KUNIT_EXPECT_TRUE(test, apple_clpc_gpu_active(gpu, &updated, &sequence));
+	apple_clpc_gpu_set_active(gpu, false);
+	KUNIT_EXPECT_FALSE(test, apple_clpc_gpu_active(gpu, &updated, &sequence));
+	apple_clpc_gpu_put(gpu);
+}
+
+static struct kunit_case apple_clpc_cases[] = {
+	KUNIT_CASE(apple_clpc_gpu_request_lifetime_test),
+	KUNIT_CASE(apple_clpc_gpu_provider_removal_test),
+	{}
+};
+static struct kunit_suite apple_clpc_suite = {
+	.name = "apple-clpc-gpu",
+	.test_cases = apple_clpc_cases,
+};
+kunit_test_suite(apple_clpc_suite);
+#endif
 
 static const struct of_device_id apple_clpc_of_match[] = {
 	{ .compatible = "apple,t8132-clpc", .data = &apple_clpc_hw_t8132 },

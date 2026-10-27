@@ -39,6 +39,7 @@ def main():
 #include <errno.h>
 typedef uint8_t u8;
 typedef uint32_t u32;
+typedef uint64_t u64;
 #define APPLE_CLPC_LEVELS 4
 #define APPLE_CLPC_HOLD_MS 32
 #define HZ 1000
@@ -49,6 +50,7 @@ typedef uint32_t u32;
 #define msecs_to_jiffies(ms) (ms)
 enum apple_clpc_rail { APPLE_CLPC_DCS, APPLE_CLPC_SOC, APPLE_CLPC_RAILS };
 ''' + types + r'''
+struct apple_clpc_gpu { bool active; };
 struct apple_clpc_cluster { unsigned int request[APPLE_CLPC_RAILS]; };
 struct apple_clpc {
  const struct apple_clpc_hw *hw;
@@ -57,9 +59,15 @@ struct apple_clpc {
  unsigned int nr_clusters, agent;
  unsigned long samples, next_scan, update_errors;
  void *covered, *pmc, *gpu_pmgr;
- u32 gpu_offset, mask;
+ u32 gpu_offset, mask, gpu_status, last_floor, last_reason;
+ bool gpu_active;
+ unsigned long gpu_read_errors;
+ u64 last_vote_ns;
+ struct apple_clpc_gpu *gpu;
 };
 static unsigned long jiffies;
+static u64 ktime_get_mono_fast_ns(void) { return jiffies * 1000000ull; }
+static bool apple_clpc_gpu_active(struct apple_clpc_gpu *g, u64 *u, u64 *s) { *u=jiffies; *s=1; return g->active; }
 static void *cpu_possible_mask;
 static u32 pmgr_status, published;
 static int read_error, vote_error;
@@ -76,6 +84,7 @@ static int apple_pmc_floor_update(void *pmc, unsigned int agent, u32 mask, u32 f
 static void apple_clpc_queue(struct apple_clpc *c, bool idle) { (void)c; queued_idle=idle; }
 ''' + tables + '\n' + methods + r'''
 static void check(const struct apple_clpc_hw *hw, u32 top) {
+ assert(hw->gpu_demand);
  struct apple_clpc c={.hw=hw,.agent=1,.mask=3,.gpu_pmgr=hw->gpu_demand ? (void *)1 : NULL};
  jiffies=0; read_error=vote_error=0; pmgr_status=0; published=~0u;
  apple_clpc_sample(&c); assert(published==0 && queued_idle);
@@ -98,10 +107,31 @@ static void check(const struct apple_clpc_hw *hw, u32 top) {
  vote_error=-EIO; apple_clpc_sample(&c); assert(c.update_errors==1);
 }
 int main(void) {
- check(&apple_clpc_hw_t6040,0x25);
+ // T6040's supplier is always powered: it must NEVER substitute for work.
+ struct apple_clpc_gpu gpu={0};
+ struct apple_clpc c={.hw=&apple_clpc_hw_t6040,.agent=1,.mask=3,.gpu=&gpu};
+ assert(!c.hw->gpu_demand);
+ jiffies=0; read_error=vote_error=0; pmgr_status=0xf0; published=~0u;
+ apple_clpc_sample(&c); assert(published==0 && queued_idle && c.last_reason==0);
+ gpu.active=true; jiffies=100; apple_clpc_sample(&c);
+ assert(published==0x25 && c.last_reason==2 && c.last_floor==0x25);
+ assert(c.last_vote_ns==100000000ull);
+ // Core/firmware supplier is still powered, but continuous idle ends demand.
+ gpu.active=false; jiffies=131; apple_clpc_sample(&c);
+ assert(published==0x25 && c.last_reason==16);
+ jiffies=132; apple_clpc_sample(&c);
+ assert(published==0 && queued_idle && c.last_reason==0);
+ // A new submission reasserts demand; independent CPU requests survive release.
+ c.nr_clusters=1; c.clusters[0].request[0]=2; c.clusters[0].request[1]=1;
+ gpu.active=true; jiffies=200; apple_clpc_sample(&c);
+ assert(published==0x25 && c.last_reason==3);
+ gpu.active=false; jiffies=232; apple_clpc_sample(&c);
+ assert(published==0x12 && c.last_reason==1);
+ c.clusters[0].request[0]=c.clusters[0].request[1]=0;
+ jiffies=264; apple_clpc_sample(&c); assert(published==0);
  check(&apple_clpc_hw_t8140,0x34);
  check(&apple_clpc_hw_t8132,0x35);
- puts("PASS: T6040 5/2, T8140 4/3 and T8132 5/3 GPU floors; 32 ms idle release; partial state, read failure, CPU demand and vote-error controls");
+ puts("PASS: T6040 5/2, T8140 4/3 and T8132 5/3 GPU floors; host-idle release despite always-on GFX, reason/timestamp, 32 ms hold, legacy PMGR/read-error and CPU controls");
 }
 '''
     code = code.replace('#define APPLE_PMC_RAIL_SHIFT(r) ((r)*8)', rail_shift)
@@ -109,7 +139,8 @@ int main(void) {
         root = Path(tmp)
         for name, text in [
             ('fixed', code),
-            ('omit-gpu-demand', code.replace('if (clpc->gpu_pmgr) {', 'if (false) {')),
+            ('omit-host-demand', code.replace('if (clpc->gpu) {', 'if (false) {')),
+            ('omit-pmgr-demand', code.replace('if (clpc->gpu_pmgr) {', 'if (false) {')),
             ('release-too-early', code.replace('msecs_to_jiffies(APPLE_CLPC_HOLD_MS)', '0')),
             ('retain-at-idle', code.replace('vote->state = 0;', '')),
         ]:
