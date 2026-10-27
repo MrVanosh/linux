@@ -2016,6 +2016,19 @@ static int dcp_desktop_dptx_disconnect_oob(struct apple_dcp *dcp, u32 port)
  * is reported by nothing else: the DP-to-HDMI converter keeps its DP link
  * up without a sink and the firmware sees no change.
  */
+/* The HDMI display gives its pipeline up: report it gone, release its link. */
+void dcp_hdmi_yield_link(struct apple_dcp *dcp)
+{
+	int tries = 5, ret;
+
+	disconnected_hpd_event(dcp->connector);
+	/* A link the firmware keeps retrying is released between attempts. */
+	while ((ret = dcp_dptx_disconnect(dcp, 0)) && --tries)
+		msleep(600);
+	if (ret)
+		dev_warn(dcp->dev, "HDMI link not released: %d\n", ret);
+}
+
 irqreturn_t dcp_desktop_dp2hdmi_hpd(struct apple_dcp *dcp)
 {
 	struct dptx_port *dptx = &dcp->dptxport[0];
@@ -2026,6 +2039,11 @@ irqreturn_t dcp_desktop_dp2hdmi_hpd(struct apple_dcp *dcp)
 	connected = gpiod_get_value_cansleep(dcp->hdmi_hpd);
 	dev_dbg(dcp->dev, "DP2HDMI HPD irq, connected:%d after 500 ms\n", connected);
 	if (!connected) {
+		/*
+		 * A yield outlasts HDMI blinks (a monitor reconfiguring its
+		 * inputs drops HPD on all of them): it ends with the Type-C
+		 * display, not with HPD here.
+		 */
 		if (!READ_ONCE(dcp->active_typec_route) && dcp->connector &&
 		    READ_ONCE(dcp->connector->connected)) {
 			dev_info(dcp->dev, "HDMI display unplugged\n");
@@ -2035,9 +2053,13 @@ irqreturn_t dcp_desktop_dp2hdmi_hpd(struct apple_dcp *dcp)
 		}
 		return IRQ_HANDLED;
 	}
-	/* The pipeline drives a Type-C display: the HDMI display waits for it. */
-	if (READ_ONCE(dcp->active_typec_route)) {
+	/*
+	 * The pipeline drives a Type-C display, or is about to: the HDMI
+	 * display waits for it, and gets it back once that one fits one pipe.
+	 */
+	if (READ_ONCE(dcp->active_typec_route) || READ_ONCE(dcp->hdmi_yielded)) {
 		dev_info(dcp->dev, "HDMI display waits: its pipeline drives a Type-C display\n");
+		dcp_fabric_hybrid_kick(dcp, 1000);
 		return IRQ_HANDLED;
 	}
 
@@ -3473,9 +3495,9 @@ static int dcp_enable_dp2hdmi_hpd(struct apple_dcp *dcp)
 		bool connected = gpiod_get_value_cansleep(dcp->hdmi_hpd);
 		dev_info(dcp->dev, "%s: DP2HDMI HPD connected:%d\n", __func__, connected);
 
-		if (connected)
+		if (connected && !READ_ONCE(dcp->hdmi_yielded))
 			dcp_dptx_connect(dcp, 0);
-		else
+		else if (!connected)
 			_dcp_poweroff(dcp);
 	}
 
@@ -3680,7 +3702,8 @@ void dcp_poweron(struct platform_device *pdev)
 		bool connected = gpiod_get_value_cansleep(dcp->hdmi_hpd);
 		dev_info(dcp->dev, "%s: DP2HDMI HPD connected:%d\n", __func__, connected);
 
-		if (connected)
+		/* A yielded hybrid is about to take a Type-C display. */
+		if (connected && !READ_ONCE(dcp->hdmi_yielded))
 			dcp_dptx_connect(dcp, 0);
 	}
 
@@ -4461,6 +4484,7 @@ VISIBLE_IF_KUNIT void dcp_disable_typec_work(struct apple_dcp *dcp, bool release
 	disable_delayed_work_sync(&dcp->hdmi_settle_wq);
 	disable_delayed_work_sync(&dcp->hdmi_recheck_wq);
 	disable_delayed_work_sync(&dcp->link_recovery_wq);
+	disable_delayed_work_sync(&dcp->hybrid_wq);
 	dcp_hdmi_disable(dcp);
 }
 
@@ -4475,6 +4499,7 @@ VISIBLE_IF_KUNIT void dcp_enable_typec_work(struct apple_dcp *dcp)
 	enable_delayed_work(&dcp->hdmi_settle_wq);
 	enable_delayed_work(&dcp->hdmi_recheck_wq);
 	enable_delayed_work(&dcp->link_recovery_wq);
+	enable_delayed_work(&dcp->hybrid_wq);
 	dcp_hdmi_enable(dcp);
 	scoped_guard(mutex, &dcp->hpd_mutex)
 		dcp->typec_work_enabled = true;

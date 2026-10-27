@@ -125,6 +125,23 @@ static int dcp_peer_call_oob(struct apple_dcp *dcp, const char *tag,
  * this the peer stays marked as an owner's peer after its port was taken by
  * another display, and swap_complete would discard that display's own swaps.
  */
+/* Drop @owner's reservation of @peer unless their pair runs; peer lock held. */
+static void dcp_peer_drop_locked(struct apple_dcp *owner, struct apple_dcp *peer)
+{
+	lockdep_assert_held(&dcp_peer_lock);
+	if (owner->peer_reserved != peer || owner->peer_tiling.vftg ||
+	    owner->peer_tiling.member || peer->peer_tiling.vftg ||
+	    peer->peer_tiling.member)
+		return;
+	memset(&owner->peer_tiling, 0, sizeof(owner->peer_tiling));
+	memset(&peer->peer_tiling, 0, sizeof(peer->peer_tiling));
+	peer->peer_owner = NULL;
+	owner->peer_reserved = NULL;
+	owner->peer_active = false;
+	dev_info(owner->dev, "peer %s no longer reserved: it drives a display of its own\n",
+		 dev_name(peer->dev));
+}
+
 void dcp_peer_release_26_6(struct apple_dcp *dcp)
 {
 	guard(mutex)(&dcp_peer_lock);
@@ -249,6 +266,16 @@ int dcp_peer_hints_26_6(struct apple_dcp *dcp, struct dptx_port *port,
 	guard(mutex)(&dcp_peer_lock);
 	if (dcp->peer_unbinding || dcp->crashed)
 		return -ENODEV;
+	/*
+	 * A reservation made before a pipe got a display of its own (a Type-C
+	 * display moved there, or an HDMI display that came) is stale: the
+	 * pipe is nobody's peer any more.  A running pair keeps it.
+	 */
+	if (dcp->peer_owner && READ_ONCE(dcp->active_typec_route))
+		dcp_peer_drop_locked(dcp->peer_owner, dcp);
+	if (dcp->peer_reserved &&
+	    (dcp_peer_reject_26_6(dcp, dcp->peer_reserved) & ~BIT(1)))
+		dcp_peer_drop_locked(dcp, dcp->peer_reserved);
 	if (dcp->peer_owner) {
 		memset(&r->primary_id, 0, 32);
 		return 0;
@@ -272,7 +299,8 @@ int dcp_peer_hints_26_6(struct apple_dcp *dcp, struct dptx_port *port,
 		}
 		if (!peer) {
 			dev_info(dcp->dev, "no idle peer pipe for a %u px display\n", width);
-			WRITE_ONCE(dcp->peer_starved, !!READ_ONCE(dcp->active_typec_route));
+			WRITE_ONCE(dcp->peer_starved, true);
+			dcp_fabric_hybrid_kick(dcp, 0);
 			memset(&r->primary_id, 0, 32);
 			return 0;
 		}
