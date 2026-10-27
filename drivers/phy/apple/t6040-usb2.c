@@ -1045,8 +1045,8 @@ static void t6040_usb3_switch_unregister(void *sw)
  * link rate through phy_configure(): the per-rate link sequence is the T6050
  * fixed-DP table (atc-t6050-dp-data.h; the T6050 ADT names its PHY
  * "atc-phy,t6050", "atc-phy,t6040"), followed by the T6040 DP clock switch in
- * the "cfg" window. Pin assignment D (two DP lanes next to USB3) is not
- * supported.
+ * the "cfg" window. Pin assignment D shares USB3's running PHY and uses
+ * the two-lane group link sequences below.
  */
 
 /* The fixed DPTX tunable writes (apply_dptx_tunables, shared with USB3). */
@@ -1446,7 +1446,7 @@ static int t6040_dp_power_on(struct phy *phy)
 			t6040_usb3_up_locked(tphy);
 		if (!tphy->usb3_up)
 			return -ENOLINK;
-		t6040_dp_fixed_tunables(t6040_core(tphy));
+		/* USB3 startup already applied these DPTX tunables before firmware. */
 		t6040_dp_aux_init(tphy);
 		tphy->dp_rate = -1;
 		tphy->dp_mode_two_lanes = true;
