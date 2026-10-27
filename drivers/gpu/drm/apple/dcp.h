@@ -144,6 +144,7 @@ unsigned int apple_j613_25g83_clock_hz(void);
 bool apple_t8122_25g83_board(void);
 
 void dcp_typec_hybrid_first_dt(void);
+void dcp_link_recovery_schedule(struct apple_dcp *dcp);
 
 /* Desktop 26.6 dual-pipe peer (dcp-peer-v26_6.inc, included from dcp.c) */
 struct dptx_port;
