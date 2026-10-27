@@ -1005,9 +1005,13 @@
 	 * only hands to its firmware, so the two do not conflict; "rails"
 	 * comes first so that this node's unit address differs from
 	 * pmgr_dcp's.
-	 * Static voters are CLPC (1) and AP (3). The PMP's agent (0) stays
-	 * off while the PMP does not run: iBoot leaves its floor at the top
-	 * DCS state.
+	 * Static voters are the PMP (0), CLPC (1) and AP (3). The PMP votes
+	 * the DCS and fabric for memory clients other than the CPUs, the GPU
+	 * among them; without its agent, GPU work runs at a low DCS
+	 * state unless a CPU is busy. iBoot leaves the PMP's floor at the top
+	 * DCS state, so its agent must stay off while the PMP does not run:
+	 * apple,pmp holds off the PMC until the PMP driver has bound, and
+	 * unbinds the PMC first.
 	 */
 	pmc: power-management@5048aa000 {
 		compatible = "apple,t6041-pmc";
@@ -1017,7 +1021,8 @@
 		nonposted-mmio;
 		#address-cells = <1>;
 		#size-cells = <0>;
-		apple,static-voters = <1 3>;
+		apple,pmp = <&pmp>;
+		apple,static-voters = <0 1 3>;
 		status = "disabled";
 
 		clpc: performance-controller@1 {
