@@ -7,8 +7,9 @@ two r6 display patches. The reconstructed r6 branch is
 `wip/j616s-display-r6` at `af0a664046fb`.
 
 This series repairs regression coverage and a shared KUNIT=m WERROR build defect,
-and ports GPU-driven memory/fabric demand and PMP voter cooperation using
-T6040 data. GPU voltages, firmware features and the submission algorithm remain
+ports GPU-driven memory/fabric demand and PMP voter cooperation using
+T6040 data, honors the existing DT idle-delay policy, and closes a compute
+release-witness gap across recovery. GPU voltages, firmware features and the submission algorithm remain
 unchanged from the reconstructed base. The major
 T6040 calibration and image-admission changes requested by this audit are
 already in the baseline. Software parity does not establish benchmark or CTS
@@ -24,7 +25,7 @@ parity. There are no J616s results for this series yet.
 | DVFS ramp / effort | Full effort on publication, cleared after 16 ms of continuous idle | Same `Firmware::note_submission`, direct-port accounting and race-checked idle clear | Same runtime behavior | `g17/mod.rs`, `g17/port.rs`, `g17/power.rs`; opaque firmware power words are not a documented ramp control |
 | GPU-driven fabric/memory floor | #440 lifts DCS 4/fabric 3 for GPU demand | T6040 CPU-only demand, gpu_demand=false and no power-state phandle | Port 0d63308820ab enables the shared mechanism with existing T6040 DCS 5/fabric 2 data | clpc.c and T6040 DT; g1/g2 P/C/R/H/I measurements required |
 | PMP PMC vote cooperation | PMP/CLPC/AP agents enabled | T6040 static voters omit PMP 0 from pre-working-PMP bring-up | Port 772a9d3104ff adds the existing PMP supplier dependency and voter 0 on T6040 DCS/SOC rails | pmc.c and T6040 DT; live votes, idle release and thermal qualification required |
-| Idle / off policy | Shared host hold and firmware device-control path | Same host implementation; source documents a 25G83 effective 2 ms off delay and approximately 1 ms wake cost | Same runtime behavior; default hold unchanged | `g17/power.rs`; measure actual idle/wake latency before altering policy |
+| Idle / off policy | Shared host hold and firmware device-control path | Same host implementation; source documents a 25G83 effective 2 ms off delay and approximately 1 ms wake cost | J616s requests a bounded 16 ms host hold through existing `apple,idle-off-delay-ms`; absent policy retains 2 ms | `g17/power.rs`, `g17/mod.rs`, J616s DT and binding; compare short/long gaps, depth-one latency and idle power |
 | Fast-die / PMP | Platform-specific firmware power graph | 25G83 AON table and separate power-state target/release (101/96 C) are already populated; DT enables the GFX suppliers | Same runtime behavior | `g17/fw/initdata/v25g83.rs::POWER_STATE_WORDS`, `g17/initdata/v25g83.rs`, J616s DT; verify clocks with PMP running |
 | Periodic preemption | Context-switch timer mask is zero | Same zero mask; two-cluster operand-state allocation differs by hardware layout | Same runtime behavior | `g17/fw/initdata.rs::CONTEXT_SWITCH_TIMER_MASK`, `g17/fw/compute.rs::OperandState`; no evidence supports changing the mask |
 | High-priority queues | HIGH / MEDIUM / LOW firmware scheduling profiles | Same scheduling-policy selector and priority work rings | Same runtime behavior | `g17/mod.rs::scheduling_policy`, `g17/fw/channels.rs`, `g17/qos.rs` |
@@ -39,13 +40,39 @@ parity. There are no J616s results for this series yet.
 | G13/G14 idle wake regressions | Firmware-specific cost plus shared host overhead | G16S shares common ioctl/GEM/sync infrastructure, but has different firmware, power handling and queue backend | Same runtime behavior | `driver.rs`, `g17/power.rs`; G13/G14 benchmark ratios cannot be transferred to G16S |
 | QID capacity | Firmware floor 0; reserve protects dedicated render pairs | 25G83 reserves QIDs 0..31; public queue limit is reduced accordingly | KUnit checks floor 32 in dynamic growth and full logical queue budget tests; host resource runner follows current reserve helper | `g17/kick.rs`, `g17/runtime.rs`, `tools/asahi/g17-resource-tests.py` |
 | KUnit / WERROR config matrix | Shared test modules require KUNIT=y | Four G17 test helpers used the broader CONFIG_KUNIT guard and failed WERROR with the shipping KUNIT=m config | Helpers now use CONFIG_KUNIT = "y", matching the Rust macro; config and warning policy unchanged | `rust/macros/kunit.rs`, `g17/kick.rs`, `g17/preparation.rs`, `g17/queue/admission.rs`, `g17/runtime.rs`; verify both KUNIT=m release and KUNIT=y QEMU builds |
-| Compute ownership / retained mappings | Recovery and retirement witnesses protect mapping lifetime | Same production queue ownership, source loans, growth rollback and deferred release | Restored host fixtures and negative controls; source loans explicitly prevent premature reuse/sharing/rearming | `tools/asahi/g17-capacity-fault-tests.py`, constructor/growth/pool/release-order fixtures |
-| Restart and fault classification | Shared recovery handshake plus validated T8140 per-slot keys | Shared handshake uses 25G83 status offsets; `recovery_slot_keys=None` preserves firmware blame when keys are unknown | Same runtime behavior | `hw/t6040.rs`, `g17/initdata.rs`, `g17/recovery/attribution.rs`; successful 25G83 fault/restart qualification is still required |
+| Compute ownership / retained mappings | Recovery and retirement witnesses protect mapping lifetime | Same production queue ownership, source loans, growth rollback and deferred release | Aged-record fallback now requires the original recovery generation; source loans and host negative controls remain | `tools/asahi/g17-capacity-fault-tests.py`, constructor/growth/pool/release-order fixtures |
+| Restart and fault classification | Shared recovery handshake plus validated T8140 per-slot keys | Shared handshake uses 25G83 status offsets; `recovery_slot_keys=None` preserves firmware blame when keys are unknown | Bounded generation/slot/progress diagnostics retain unknown ownership; any missing selected key preserves firmware blame | `hw/t6040.rs`, `g17/initdata.rs`, `g17/recovery/attribution.rs`; successful 25G83 fault/restart qualification is still required |
 | DART / UAT | Shared mapping ownership and checked page-table borrowing | Shared MMU, with T6040 reserved tables, PoC cleaning, per-page TLBI and native GPU permission quirks | Same runtime behavior | `hw/t6040.rs`, `mmu.rs`, `pgtable.rs`; do not remove coherency or handoff requirements for a benchmark |
 | Memory accounting | Creator-attributed committed/resident GEM accounting and capacity admission | Same `memacct::Client`, `File::memory_stats` and shared capacity machinery | Same runtime behavior | `file.rs`, `gem.rs`, `memacct.rs`, `g17/capacity.rs`; verify multi-client high-water and post-close behavior on hardware |
 | MCache / few-primitives / ray traversal | Enabled by the 26A428 variant | Disabled by 25G83 variant; source records hangs for few-primitives and stalled ray traversal, while MCache is unqualified | Same runtime behavior | `g17/fw/variant.rs::V25G83`; enabling these requires independent ABI evidence and hardware tests |
 | M5 Pro comparison | No M5 Pro hardware configuration exists in this public baseline | No T605x/G17S KMD path to compare | No claim of M5 parity | Pinned public tree contains T6040 and T8140; a licensed public M5 Pro reference is required |
 | CTS and Linux/macOS performance ratio | Hardware results belong to their exact kernel/Mesa pair | No result for this candidate | Pending hardware agent | Run gpubench with matching suite, configuration and conditions; review CTS failures and kernel faults before claiming parity |
+
+## GPU memory demand and interactive latency
+
+The GFX PMP report entry and PMC performance votes are separate mechanisms.
+The existing T6040 `pmp_gfx` soc-device 13 entry follows the powered GPU domain;
+`apple_pmp_report_set_state()` publishes a power-state request bit and waits
+for its acknowledgement. It does not encode a DCS/fabric performance request.
+The GPU firmware owns the PMP's performance demand. Before this series, PMC's
+static voter list omitted PMP agent 0, and CLPC lacked a GPU power-state input.
+The two existing ports enable PMP agent 0 on T6040's DCS/SOC rails and make
+CLPC request the already qualified DCS 5 / fabric 2 floor while graphics is
+powered. They preserve the existing 32 ms memory-floor release. Prove live
+request, enabled-agent and actual-state agreement; supplier binding alone
+is not proof of an honoured vote.
+
+For dispatch latency, G17 now reads the existing `apple,idle-off-delay-ms` DT
+policy, validates the existing 2..1000 ms bounds, and starts the existing host
+hold with that policy. J616s selects 16 ms, matching the existing effort-idle
+interval; other boards without the property retain the native 2 ms behavior.
+This avoids power-off across short interactive gaps and releases after real
+idle, without changing firmware layout or adding a parameter/platform flag.
+KUnit covers absent/valid/invalid policy and repeated depth-one gaps followed
+by idle release. A shorter software delay is not itself a measured latency
+win: compare actual power transitions, firmware execution, IRQ/retirement and
+fence wakeup boundaries. Keep empty CPU fence transfers separate from GPU
+round trips and require low-duty/long-idle power acceptance.
 
 ## Remaining 25G83 facts and recovery qualification
 
