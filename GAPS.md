@@ -107,6 +107,35 @@ and page-fault fallback. Diagnostic counters explicitly identify lifetime
 stampless totals; they are not a count of commands retired by one restart.
 
 
+## g5 large-target capacity correction
+
+Public CTS `vulkan-cts-1.4.6.2` uses a 10240-square framebuffer for
+`rasterization.primitive_size.points.point_size_10000`. The existing 25G83
+GTP layout appends a sub-buffer of 64 times the tile map after the TPC.
+Applying the inherited 32 MiB cache bound to this combined allocation rejects
+that valid target with ERANGE, despite its cache and tile record each fitting
+their original limits. This is reproducible in the production layout code
+without GPU execution. The normalized hardware summary contains ERANGE and
+reason-2 recoveries but cannot establish their order or one-to-one association.
+
+G5 applies the original TPC_MAX to the aligned cache, preserving the original
+tile-record bound before allocation or growth. The tile-map bound also caps
+the derived auxiliary extent. It changes no firmware buffer-sizing formula,
+numeric limit, VA window, generation/retention rule or allocation accounting.
+Neo has no auxiliary tail and keeps the same policy. KUnit covers both utile
+shapes at the CTS target size, oversized cache/layered-record rejection and
+Neo capacity. Fresh and growing targets use the same preflight. Large targets
+need their full required metadata through the existing memory/VA mechanisms;
+allocation failure still propagates. Hardware execution/readback and post-close
+memory/capacity baselines are mandatory acceptance gates.
+
+The separate 1 MiB vertex/barrier case uses a 256-square target, not a large
+framebuffer. Its point count is actual vertex-buffer bytes divided by stride.
+It cannot be explained by the large-target capacity guard. Preserve its first
+operation/exception, generated sequence and the halted-state TVB/growth/pass
+snapshots before choosing a coherence, VM-bind or firmware-timeout fix. The
+point-target correction is not a claim that firmware reason 2 is decoded.
+
 ## g5 recovery evidence and host-hop timing
 
 The shared recovery service previously captured slot keys and monitors at
