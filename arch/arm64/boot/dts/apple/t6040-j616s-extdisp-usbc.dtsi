@@ -95,10 +95,18 @@
 &typec0 {
 	ports {
 		port@3 {
+			#address-cells = <1>;
+			#size-cells = <0>;
 			reg = <3>;
 
-			typec0_dcpext1: endpoint {
+			typec0_dcpext1: endpoint@0 {
+				reg = <0>;
 				remote-endpoint = <&dcpext1_typec0>;
+			};
+
+			typec0_dcpext0: endpoint@1 {
+				reg = <1>;
+				remote-endpoint = <&dcpext0_typec0>;
 			};
 		};
 	};
@@ -107,10 +115,18 @@
 &typec1 {
 	ports {
 		port@3 {
+			#address-cells = <1>;
+			#size-cells = <0>;
 			reg = <3>;
 
-			typec1_dcpext1: endpoint {
+			typec1_dcpext1: endpoint@0 {
+				reg = <0>;
 				remote-endpoint = <&dcpext1_typec1>;
+			};
+
+			typec1_dcpext0: endpoint@1 {
+				reg = <1>;
+				remote-endpoint = <&dcpext0_typec1>;
 			};
 		};
 	};
@@ -119,10 +135,18 @@
 &typec2 {
 	ports {
 		port@3 {
+			#address-cells = <1>;
+			#size-cells = <0>;
 			reg = <3>;
 
-			typec2_dcpext1: endpoint {
+			typec2_dcpext1: endpoint@0 {
+				reg = <0>;
 				remote-endpoint = <&dcpext1_typec2>;
+			};
+
+			typec2_dcpext0: endpoint@1 {
+				reg = <1>;
+				remote-endpoint = <&dcpext0_typec2>;
 			};
 		};
 	};
@@ -176,6 +200,67 @@
 			port {
 				dcpext1_typec2: endpoint {
 					remote-endpoint = <&typec2_dcpext1>;
+				};
+			};
+		};
+	};
+};
+
+/*
+ * dcpext0 also offers a route to every Type-C port, next to its fixed HDMI
+ * path (a hybrid pipeline, as the T6030 J514s).  It is the only pipe that
+ * can be the primary of a two-pipe display (firmware endpoint 1; the pipes
+ * merge upwards only, m4.138), so a 7680 px sink on USB-C needs it: the
+ * fabric takes it for a Type-C port with appledrm.typec_hybrid_first.
+ * ADT: atcN-dpphy dp-switch-dfp-endpoint 0 = dispext0 = crossbar state 0,
+ * as its HDMI route on atcphy3 (mux-index 0).
+ */
+&dcpext0 {
+	phys = <&atcphy3 PHY_TYPE_DP>,
+	       <&atcphy0 PHY_TYPE_DP>, <&atcphy1 PHY_TYPE_DP>, <&atcphy2 PHY_TYPE_DP>;
+	phy-names = "dp-phy", "typec0", "typec1", "typec2";
+	mux-controls = <&atcphy3_xbar 0>,
+		       <&atcphy0_xbar 0>, <&atcphy1_xbar 0>, <&atcphy2_xbar 0>;
+	mux-control-names = "dp-xbar", "typec0", "typec1", "typec2";
+	apple,typec-dptx-phys = <0 1 2>;
+	apple,typec-mux-indices = <0 0 0>;
+
+	typec-routes {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		route@0 {
+			reg = <0>;
+			mode-switch;
+			status = "disabled";
+
+			port {
+				dcpext0_typec0: endpoint {
+					remote-endpoint = <&typec0_dcpext0>;
+				};
+			};
+		};
+
+		route@1 {
+			reg = <1>;
+			mode-switch;
+			status = "disabled";
+
+			port {
+				dcpext0_typec1: endpoint {
+					remote-endpoint = <&typec1_dcpext0>;
+				};
+			};
+		};
+
+		route@2 {
+			reg = <2>;
+			mode-switch;
+			status = "disabled";
+
+			port {
+				dcpext0_typec2: endpoint {
+					remote-endpoint = <&typec2_dcpext0>;
 				};
 			};
 		};
