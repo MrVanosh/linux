@@ -18,6 +18,7 @@
 #include <linux/usb/typec_mux.h>
 
 #include "dcp-fabric.h"
+#include "dcp-peer-v26_6.h"
 #include "dcp-fabric-session.h"
 #include "dcp-relink.h"
 #include "dptxep.h"
@@ -287,6 +288,22 @@ struct apple_dcp {
 	bool vblank_works_disabled;
 	struct dcp_fabric_pipeline fabric;
 	struct device *dev;
+	/* Peer DCP for dual-pipe (desktop 26.6): the primary reserves an idle
+	 * peer pipe; the peer records its owner.  Protected by dcp_peer_lock.
+	 */
+	struct apple_dcp *peer_reserved;
+	struct apple_dcp *peer_owner;
+	struct dcp_peer_tiling peer_tiling;
+	bool peer_unbinding;
+	/* Firmware display endpoint (its Disp_Index), apple,dcp-endpoint;
+	 * separate from index, which also selects the doorbell and PHY mode. */
+	u32 peer_endpoint;
+	/* Paired DRM scanout on the primary; under dcp_peer_lock. */
+	bool peer_active, peer_failed;
+	/* The DRM mode the pair was set to (timing, color mode IDs, minRR). */
+	u32 peer_mode_timing, peer_mode_color, peer_min_vrr;
+	/* On the peer: its first completion since the pair was set was logged. */
+	bool peer_complete_logged;
 	struct platform_device *piodma;
 	bool piodma_created;
 	struct iommu_domain *iommu_dom;

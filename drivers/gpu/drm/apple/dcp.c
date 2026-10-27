@@ -60,6 +60,7 @@
 #include "dcp-external-bw.h"
 #include "dptx-service.h"
 #include "iomfb.h"
+#include "iomfb_internal.h"
 #include "iomfb_m4.h"
 #include "ibootep.h"
 #include "parser.h"
@@ -229,6 +230,9 @@ bool dcp_t6041_ext_enabled(void)
 {
 	return t6041_dcpext;
 }
+
+#include "iomfb_v26_6_swap.h"
+#include "dcp-peer-v26_6.inc"
 
 /*
  * The backlight maximum of a desktop 26.x panel whose node has no
@@ -4869,6 +4873,7 @@ VISIBLE_IF_KUNIT void dcp_comp_unbind(struct device *dev, struct device *main, v
 	}
 
 	disable_work_sync(&dcp->dimensions_wq);
+	dcp_peer_forget(dcp);
 	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6) {
 		iomfb_v26_6_unbind(dcp);
 		return;
@@ -5238,6 +5243,7 @@ static int dcp_platform_probe_pipe(struct platform_device *pdev)
 	dcp->fixed_connector_type = dcp_connector_type_from_dt(dev->of_node);
 	dcp->connector_type = dcp->fixed_connector_type;
 	of_property_read_u32(dev->of_node, "apple,dcp-index", &dcp->index);
+	of_property_read_u32(dev->of_node, "apple,dcp-endpoint", &dcp->peer_endpoint);
 	of_property_read_u32(dev->of_node, "apple,dptx-phy", &dcp->dptx_phy);
 	of_property_read_u32(dev->of_node, "apple,dptx-die", &dcp->dptx_die);
 	dcp->fixed_dptx_phy = dcp->dptx_phy;
