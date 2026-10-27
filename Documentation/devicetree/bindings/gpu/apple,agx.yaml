@@ -72,6 +72,16 @@ properties:
       - enum: [hw-cal-b, fw-text, l2-pagetables]
       - enum: [globals, fw-data, fw-text]
 
+  apple,idle-off-delay-ms:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    minimum: 2
+    maximum: 1000
+    default: 2
+    description:
+      Continuous idle time before GPU power-off, in milliseconds. The G17
+      backend extends the firmware's native delay with its host idle-hold
+      control; an absent property preserves the native policy.
+
   apple,pmp:
     $ref: /schemas/types.yaml#/definitions/phandle
     description: PMP firmware provider owning the GPU power vote and telemetry
