@@ -3012,7 +3012,11 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 
 	/*
 	 * A mode wider than one pipe goes to both pipes of a reserved pair,
-	 * with adaptive sync set the same on both.
+	 * with adaptive sync set the same on both.  The pair takes the mode's
+	 * VRR range from its first install, whatever the CRTC asks: switching
+	 * VRR on later would stop and install the pair again, and an install
+	 * that fails (the sink dropped its link meanwhile) leaves the display
+	 * dark.  Swaps keep their timestamps, so the compositor still paces it.
 	 */
 	if (!dcp->main_display) {
 		dev_dbg(dcp->dev, "modeset %ux%u vrr %u min %#x enabled %u\n",
@@ -3021,8 +3025,7 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 		ret = dcp_peer_drm_modeset_26_6(dcp, crtc_state->mode.hdisplay,
 						mode->timing_mode_id,
 						mode->color_mode_id,
-						mode->vrr && crtc_state->vrr_enabled ?
-						mode->min_vrr : 0);
+						mode->vrr ? mode->min_vrr : 0);
 		if (ret != -EOPNOTSUPP) {
 			dcp->desktop->mode_live = !ret;
 			if (!ret)

@@ -1040,9 +1040,10 @@ int dcp_peer_drm_modeset_26_6(struct apple_dcp *dcp, u32 hdisplay,
 	/*
 	 * DRM sets the same mode again right after the pair came up.  The
 	 * merged pipe no longer resolves the original timing in A364, so a
-	 * second install would fail and tear the pair down: keep it.  A
-	 * changed adaptive-sync rate (VRR switched on or off) is applied with a
-	 * mode set, as on one pipe: the pair is stopped and installed again.
+	 * second install would fail and tear the pair down: keep it.  The pair
+	 * runs with the mode's adaptive-sync rate, so VRR switched on or off
+	 * keeps it too; only a changed rate for the same timing (a new mode
+	 * list) stops the pair and installs it again.
 	 */
 	scoped_guard(mutex, &dcp_peer_lock) {
 		if (dcp->peer_tiling.modeset_complete &&
