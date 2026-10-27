@@ -259,7 +259,7 @@ int dcp_peer_hints_26_6(struct apple_dcp *dcp, struct dptx_port *port,
 
 	width = get_unaligned_le32(r->hints + 0x38);
 	if (!(r->hints[0] & 1) || !width || width <= DCP_DESKTOP_PIPE_MAX_WIDTH) {
-		memset(&r->primary_id, 0, 32);
+		memset(&r->allocation, 0, sizeof(r->allocation));
 		return 0;
 	}
 
@@ -277,7 +277,7 @@ int dcp_peer_hints_26_6(struct apple_dcp *dcp, struct dptx_port *port,
 	    (dcp_peer_reject_26_6(dcp, dcp->peer_reserved) & ~BIT(1)))
 		dcp_peer_drop_locked(dcp, dcp->peer_reserved);
 	if (dcp->peer_owner) {
-		memset(&r->primary_id, 0, 32);
+		memset(&r->allocation, 0, sizeof(r->allocation));
 		return 0;
 	}
 	peer = dcp->peer_reserved;
@@ -301,7 +301,7 @@ int dcp_peer_hints_26_6(struct apple_dcp *dcp, struct dptx_port *port,
 			dev_info(dcp->dev, "no idle peer pipe for a %u px display\n", width);
 			WRITE_ONCE(dcp->peer_starved, true);
 			dcp_fabric_hybrid_kick(dcp, 0);
-			memset(&r->primary_id, 0, 32);
+			memset(&r->allocation, 0, sizeof(r->allocation));
 			return 0;
 		}
 		WRITE_ONCE(dcp->peer_starved, false);
