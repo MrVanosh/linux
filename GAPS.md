@@ -24,7 +24,7 @@ retains it and adds the qualified shared ports and diagnostics below.
 | Raw OPP count versus logical states | Firmware consumes 11 logical states | 16 raw GPU OPPs; 11 selectors in each A/B map; both end at raw OPP 15; unused handoff slots must be zero | KUnit now uses valid complete maps and checks the final state's second voltage lane | `g17/calibration.rs`; a count of 15 in an ADT property is not evidence for expanding this firmware layout |
 | Full clock eligibility | Platform OPPs feed firmware performance tables | DT supplies both cluster voltages and GPU/CS/AFR frequencies; maps and relative-B are checked against the GPU OPP table | Same runtime behavior | `g17/initdata/v25g83.rs`, `g17/fw/initdata/v25g83.rs`; confirm sustained clocks and limiting reasons on hardware |
 | DVFS ramp / effort | Full effort on publication, cleared after 16 ms of continuous idle | Same `Firmware::note_submission`, direct-port accounting and race-checked idle clear | Same runtime behavior | `g17/mod.rs`, `g17/port.rs`, `g17/power.rs`; opaque firmware power words are not a documented ramp control |
-| GPU-driven fabric/memory floor | #440 lifts DCS 4/fabric 3 for GPU demand | T6040 CPU-only demand, gpu_demand=false and no power-state phandle | Port 0d63308820ab enables the shared mechanism with existing T6040 DCS 5/fabric 2 data | clpc.c and T6040 DT; g1/g2 P/C/R/H/I measurements required |
+| GPU-driven fabric/memory floor | #440 uses an activity-following graphics PMGR input | T6040 CPU-only demand; g3 port sampled the firmware-lifetime GFX supplier | g4 uses DT-selected publication/continuous-idle demand, preserving DCS 5/fabric 2 and 32 ms CLPC hold | `clpc.c`, `g17/power.rs`, `g17/port.rs`, T6040 DT; blank-panel release and bandwidth retention require hardware qualification |
 | PMP PMC vote cooperation | PMP/CLPC/AP agents enabled | T6040 static voters omit PMP 0 from pre-working-PMP bring-up | Port 772a9d3104ff adds the existing PMP supplier dependency and voter 0 on T6040 DCS/SOC rails | pmc.c and T6040 DT; live votes, idle release and thermal qualification required |
 | Idle / off policy | Shared host hold and firmware device-control path | Same host implementation; source documents a 25G83 effective 2 ms off delay and approximately 1 ms wake cost | J616s requests a bounded 16 ms host hold through existing `apple,idle-off-delay-ms`; absent policy retains 2 ms | `g17/power.rs`, `g17/mod.rs`, J616s DT and binding; compare short/long gaps, depth-one latency and idle power |
 | Fast-die / PMP | Platform-specific firmware power graph | 25G83 AON table and separate power-state target/release (101/96 C) are already populated; DT enables the GFX suppliers | Same runtime behavior | `g17/fw/initdata/v25g83.rs::POWER_STATE_WORDS`, `g17/initdata/v25g83.rs`, J616s DT; verify clocks with PMP running |
@@ -58,8 +58,10 @@ for its acknowledgement. It does not encode a DCS/fabric performance request.
 The GPU firmware owns the PMP's performance demand. Before this series, PMC's
 static voter list omitted PMP agent 0, and CLPC lacked a GPU power-state input.
 The two existing ports enable PMP agent 0 on T6040's DCS/SOC rails and make
-CLPC request the already qualified DCS 5 / fabric 2 floor while graphics is
-powered. They preserve the existing 32 ms memory-floor release. Prove live
+CLPC request the already qualified DCS 5 / fabric 2 floor. G3 incorrectly
+used the T6040 supplier lifetime as activity. G4 replaces that input with
+DT-selected publication/continuous-idle demand and preserves the existing
+32 ms memory-floor release. Prove live
 request, enabled-agent and actual-state agreement; supplier binding alone
 is not proof of an honoured vote.
 
@@ -120,7 +122,7 @@ no raw lab capture is a public implementation source.
 | #505 closed-context teardown | `078d744a260c` kills before freeing executed unstamped render graphs, retains firmware-linked work storage, and reuses killed pairs last with QID capacity | Shared safety/retention paths included; compute-fault-driven kill depends on the graph-qualified #496 witness | Closed mixed compute/render faults, acknowledgement ordering, memory pressure and slot/QID reuse; does not claim to cure a live render's first fault |
 | First fault | Reason and blame alone cannot identify engine progress | At halted state 1, before acknowledgement, g4 logs the blamed pair's stored stamps, free-list balance and up to four commands' pass/cursor snapshots; borrowed pairs are explicitly unavailable | Correlate exact CTS operation and original error with raw event report and snapshots; do not label reason 2 as page fault without semantics |
 | Raw firmware statistics | Complete 18-word statistics records already have checked ring geometry | Read-only `firmware_reports` exposes last full sample, count and host monotonic time for each role/type. Static-key `asahi_g17_report` copies trace/statistics/event words before slot return | Match payloads to independently decoded achieved-clock/power/residency and freshness/units; legacy statistics tags are a different ABI |
-| Idle memory floor | PMGR graphics power is a supplier lifetime, not itself an idle-work witness | Existing policy retained; CLPC status now exposes the sampled graphics status/active input and read-error count alongside CPU requests and rail votes | Long idle with no GPU clients, then load and release, must distinguish GPU power, CPU demand, failed reads and other PMC agents; never infer idle from an open client alone |
+| Idle memory floor | Neo graphics PMGR follows activity; T6040 GFX is held for firmware lifetime | g4 replaces T6040 PMGR demand with a DT-linked CLPC request, asserted at publication and released by the existing race-checked 16 ms continuous-idle clear; 32 ms CLPC hold remains | Read-only last vote/reason/time, host request and last submission, safe core power/host hold; require blank-panel quiet release and load/release cycles |
 
 Remaining exact facts for telemetry are the 25G83/26A428 tag-to-layout map,
 field width/signedness/endianness, sample/timebase/wrap and freshness,
@@ -137,6 +139,41 @@ but neither case name proves a TLB, timeout or TVB cause. No timeout, voltage,
 feature-enable or buffer-size guess is included in g4. Multi-queue sync needs
 its publish/GPU-span/event/fence timeline; #504's compute control does not
 promise to halve that path's latency.
+
+### T6040 idle-floor release correction
+
+The PMGR DT explicitly documents that GFX cannot power down while firmware
+runs. This is a source-established difference from the Neo CLPC input, so
+using GFX as T6040 work demand can never establish idle release. G4 removes
+that input on T6040 and adds `apple,clpc` from the GPU consumer to the existing
+host performance controller. This is a provider relationship, not a feature
+flag or user knob. A requested but unavailable provider defers GPU probe.
+
+Publication asserts the independent, refcounted request through a leaf lock;
+o sleeping callback or allocation runs at submission. Both mutex-backed and
+off-lock direct paths are covered. The existing effort clear checks in-flight
+work and 16 ms continuous idle, withdraws its flag, then rechecks the direct
+submission counter. A racing publisher reasserts demand. The CLPC vote keeps
+its existing 32 ms hold; CPU arbitration and Neo's PMGR input are unchanged.
+Firmware stop and request destruction clear demand. Provider removal cannot
+free storage retained by a late consumer, and a device link orders dependencies.
+
+CLPC status now shows the last requested floor, reason bits and monotonic
+time, plus the host request's activity/update sequence. Actual PMC readback
+and write errors remain distinct. Read-only `asahi-g17/power` reports the
+existing always-accessible core power witness, host hold, effort and last
+publication time, without waking firmware. Generic runtime PM may remain
+unsupported because autonomous core gating is firmware-managed; no fictitious
+runtime-suspend implementation is enabled. Raw stats still do not decode MHz.
+
+The production CLPC host suite tests an always-powered supplier with absent,
+busy and ended GPU demand, 32 ms hold, CPU coexistence, reason/time and legacy
+Neo behavior; removing demand or idle release fails its negative controls.
+C KUnit checks actual request lifetime and a late consumer after provider
+removal. Hardware acceptance requires a locked/blank panel with publications
+observably quiet, release after the hold, then three load/idle cycles and
+retention of g3's benchmark gains. An active compositor alone proves neither
+quiescence nor a latch. Keep failed measurements and rollback candidates.
 
 ## Source and validation boundaries
 
