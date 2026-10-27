@@ -28,13 +28,13 @@ def fixture():
     retirement = (ROOT / 'queue/compute/retirement.rs').read_text()
     previous = item(source, 'struct Previous<') + '\n' + item(source, 'impl<B, C> Previous<B, C>')
     methods = '\n'.join(item(source, sig) for sig in [
-        'pub(crate) fn release_owner(', 'pub(crate) fn reusable(',
+        'fn witness_stamp(', 'pub(crate) fn release_owner(', 'pub(crate) fn reusable(',
         'pub(crate) fn recycle_quarantined_idle(', 'pub(crate) fn recycle_killed(',
         'fn recycle_settled(', 'fn release_witnessed_inner(', 'pub(crate) fn share_idle(', 'pub(crate) fn shareable(', 'pub(crate) fn can_rearm(', 'pub(crate) fn recycled_pending('])
     exit_source = (ROOT / 'queue/compute/exit.rs').read_text()
     methods += '\n' + item(exit_source, 'pub(crate) fn settle_exit(').replace('super::Previous', 'Previous').replace('crate::g17::qos::Owner', 'qos::Owner')
     drain = item((ROOT / 'mod.rs').read_text(), 'fn drain_reclaims(')
-    proof = item(retirement, 'pub(crate) const fn stamp_covers(') + '\n' + item(retirement, 'pub(crate) fn quarantined_retired(')
+    proof = item(retirement, 'pub(crate) const fn stamp_newer(') + '\n' + item(retirement, 'pub(crate) const fn stamp_covers(') + '\n' + item(retirement, 'pub(crate) fn quarantined_retired(')
     return r'''
 #![allow(dead_code)]
 use std::sync::{Arc, atomic::{AtomicUsize, AtomicU32, Ordering}};
@@ -108,7 +108,7 @@ struct Queue {
     retired_by_teardown: bool, spared_quarantine: bool, spared_deferred: bool,
     retire_pending: bool, retirement_proved: bool, replay_retirement: bool,
     replay_error: Option<Error>, replay_prepared: bool, submitted: u32, kick: Kick,
-    config_cache: Option<()>, source_hint: ReaderHint, source_readers: AtomicU32, claims: u32,
+    config_cache: Option<()>, source_hint: ReaderHint, source_readers: AtomicU32, claims: u32, fault_stamp: Option<u32>,
 }
 impl Queue {
     fn valid_ticket(&self, _: &Active, _: &Ticket) -> Result { Ok(()) }
@@ -128,7 +128,7 @@ fn idle(live: &Arc<AtomicUsize>) -> Queue {
         retired_by_teardown: false, spared_quarantine: false, spared_deferred: false,
         retire_pending: false, retirement_proved: false, replay_retirement: false,
         replay_error: None, replay_prepared: false, submitted: 0, kick: Kick,
-        config_cache: None, source_hint: ReaderHint { possible: false }, source_readers: AtomicU32::new(0), claims: 0,
+        fault_stamp: None, config_cache: None, source_hint: ReaderHint { possible: false }, source_readers: AtomicU32::new(0), claims: 0,
     }
 }
 fn fault(live: &Arc<AtomicUsize>) -> Queue {

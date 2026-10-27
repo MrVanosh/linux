@@ -121,6 +121,8 @@ struct Active { ticket: Ticket }
 struct Packet { context: Arc<Context> }
 struct Pair { executed: u64, switch: Option<(u64, u64)>, replay: Vec<()>, active: Vec<Active>, idle: bool }
 impl Pair {
+    // This ordering fixture models no faulted/executed unstamped pair.
+    fn executed_for_kill(&self, _: &Arc<Context>) -> bool { false }
 SWITCH
     /// Host stand-in for a successful publication of `ordinal` (stand-in, not production).
     fn publish(&mut self, packet: &Packet, ordinal: u64) {

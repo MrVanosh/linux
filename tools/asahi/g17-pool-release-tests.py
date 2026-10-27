@@ -98,6 +98,8 @@ struct Registry {
     admission: Admission,
 }
 impl Registry {
+    // Physical-QID capacity notification does not change this pool-release fixture.
+    fn note_build_room(&self) {}
 METHODS
     fn poll(&self) -> bool {
         self.compute.iter().flatten().filter_map(|entry| entry.queue.as_deref())PREDICATE

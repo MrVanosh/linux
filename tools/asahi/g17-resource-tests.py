@@ -24,7 +24,7 @@ def admission_tests(root, source):
     limits='\n'.join(re.search(r'const '+name+r': [^;]+;',mmu).group(0) for name in ['EXECUTION_CONTEXT_MASK','MAX_EXECUTION_CONTEXTS'])
     header='''#![allow(dead_code, unused_macros)]
     type Result<T=()> = std::result::Result<T,i32>;
-    mod g17 { pub mod capacity {
+    mod g17 { pub mod trace { pub fn teardown(_:u8,_:u64,_:u64,_:u64) {} } pub mod capacity {
         pub enum Site { RenderSlots, LogicalQueues, ComputeReserve, PhysicalQids }
         pub fn refused(_: Site) -> i32 { -28 }
     }}
@@ -137,7 +137,7 @@ def queue_tests(root, source):
     constants=re.search(r'const QID_MAX: [^;]+;',fw).group(0)+'\n'+'\n'.join(re.search(r'const '+name+r': [^;]+;',s).group(0) for name in ['QID_COUNT','RENDER_HEADROOM','FULL_RENDER_RESERVE'])
     header='''#![allow(dead_code, unused_macros)]
     type Result<T=()> = std::result::Result<T,i32>;
-    mod g17 { pub mod capacity {
+    mod g17 { pub mod trace { pub fn teardown(_:u8,_:u64,_:u64,_:u64) {} } pub mod capacity {
         pub enum Site { RenderSlots, LogicalQueues, ComputeReserve, PhysicalQids }
         pub fn refused(_: Site) -> i32 { -28 }
     }}
