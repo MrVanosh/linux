@@ -38,6 +38,18 @@ MODULE_PARM_DESC(tiled_split,
 
 static bool typec_follow_crtc = true;
 module_param(typec_follow_crtc, bool, 0444);
+
+/*
+ * The hybrid pipeline (dcpext0: fixed HDMI PHY + Type-C routes) normally
+ * comes last for a Type-C port, kept for an HDMI display.  On the J616s it
+ * is also the only pipe that can be the primary of a two-pipe display
+ * (firmware endpoint 1; the pipes merge upwards only): with this set a
+ * Type-C port takes it first, so a 7680 px sink on USB-C can pair with
+ * dcpext1 as its peer.  Read when a port is planned (replug to apply).
+ */
+static bool typec_hybrid_first;
+module_param(typec_hybrid_first, bool, 0644);
+MODULE_PARM_DESC(typec_hybrid_first, "Type-C ports take the hybrid (HDMI) pipeline first (dual-pipe primary)");
 MODULE_PARM_DESC(typec_follow_crtc,
 		 "Let direct DP-alt routes follow their selected CRTC (default: on)");
 
@@ -193,7 +205,8 @@ static bool dcp_typec_route_available(struct apple_dcp_typec_route *route)
 		.fixed_busy = dcp_typec_route_busy(route),
 	};
 
-	struct dcp_fabric_policy policy = { .dual_stream = dcp_typec_ordered_dual_stream() };
+	struct dcp_fabric_policy policy = { .dual_stream = dcp_typec_ordered_dual_stream(),
+					    .hybrid_first = typec_hybrid_first };
 
 	pipeline.presence = dcp_hdmi_presence(route->dcp);
 	return dcp_fabric_available(&pipeline, &policy);
@@ -1069,6 +1082,7 @@ dcp_typec_free_route(struct apple_dcp_typec_port *port)
 	struct dcp_fabric_policy policy = {
 		.dual_stream = dcp_typec_ordered_dual_stream(),
 		.follow = dcp_typec_port_follows(port),
+		.hybrid_first = typec_hybrid_first,
 	};
 
 	dcp_fabric_snapshot_port(port, false);
@@ -2045,6 +2059,7 @@ static int dcp_tb_candidate(void *data)
 		struct dcp_fabric_policy policy = {
 			.dual_stream = dcp_typec_ordered_dual_stream(),
 			.follow = dcp_typec_port_follows(port),
+			.hybrid_first = typec_hybrid_first,
 		};
 		struct dcp_fabric_route *chosen;
 		bool connector_present = dpin ? !!port->secondary_connector : !!port->connector;
@@ -2776,7 +2791,8 @@ static int dcp_typec_follow_decide(struct apple_dcp *dcp, struct drm_crtc *crtc,
 				   struct apple_connector *connector,
 				   struct dcp_typec_follow *follow)
 {
-	struct dcp_fabric_policy policy = { .dual_stream = dcp_typec_ordered_dual_stream() };
+	struct dcp_fabric_policy policy = { .dual_stream = dcp_typec_ordered_dual_stream(),
+					    .hybrid_first = typec_hybrid_first };
 	struct apple_dcp_typec_route *from, *to, *holder, *back = NULL;
 	struct apple_dcp_typec_port *port, *other = NULL;
 	bool secondary, off = false;
