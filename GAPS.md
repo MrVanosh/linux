@@ -12,8 +12,9 @@ T6040 data, honors the existing DT idle-delay policy, and closes a compute
 release-witness gap across recovery. GPU voltages, firmware features and the submission algorithm remain
 unchanged from the reconstructed base. The major
 T6040 calibration and image-admission changes requested by this audit are
-already in the baseline. Software parity does not establish benchmark or CTS
-parity. There are no J616s results for this series yet.
+already in the baseline. Software parity does not establish all-workload benchmark or CTS
+parity. The operator has selected g3 as the measured J616s baseline; g4
+retains it and adds the qualified shared ports and diagnostics below.
 
 ## Gap table
 
@@ -30,7 +31,7 @@ parity. There are no J616s results for this series yet.
 | Periodic preemption | Context-switch timer mask is zero | Same zero mask; two-cluster operand-state allocation differs by hardware layout | Same runtime behavior | `g17/fw/initdata.rs::CONTEXT_SWITCH_TIMER_MASK`, `g17/fw/compute.rs::OperandState`; no evidence supports changing the mask |
 | High-priority queues | HIGH / MEDIUM / LOW firmware scheduling profiles | Same scheduling-policy selector and priority work rings | Same runtime behavior | `g17/mod.rs::scheduling_policy`, `g17/fw/channels.rs`, `g17/qos.rs` |
 | Timestamp publication | Retains one CPU mapping for each firmware timestamp buffer | Same shared timestamp buffer and completion publication | Host timestamp suite again compiles and executes the production retained-mapping writer | `timestamp.rs`, `mmu.rs::TimestampVmap`, `tools/testing/selftests/drivers/gpu/asahi-m4/test-timestamps.py` |
-| Statistics | Drains firmware statistics; no `agx_stats` snapshot | Same; `stats_snapshot()` returns `None` on both | Same runtime behavior | `g17/channel.rs`, `g17/runtime/events.rs`, `g17/mod.rs`; statistics decoding/export remains a shared limitation |
+| Statistics | Drains firmware statistics; no decoded `agx_stats` snapshot | Same; payloads discarded | g4 preserves full per-type/per-role raw snapshots and static-key report tracing | `g17/reports.rs`, `g17/channel.rs`, `g17/trace.*`; achieved-frequency/power decoding remains gated on firmware semantics |
 | Firmware startup / registration | Two instances, message acknowledgement, POWER_ON_DONE and MMIO render-pair registration; no lead commands | One merged 25G83 graph, status acknowledgement, no POWER_ON_DONE, no MMIO pair registration; lead commands required | Same runtime behavior | `g17/fw/variant.rs`, `g17/initdata/v25g83.rs`; startup differences are ABI requirements, while MMIO pair registration on 25G83 remains unqualified |
 | Queue pointer / restart layout | Producer at +0x40, recovery target at +0x50 | Producer at +0x50, no recovery-target word | Same runtime behavior | `g17/fw/variant.rs::PointerLayout`, `g17/fw/queue.rs`; do not copy another firmware build's offsets |
 | Core topology / mapping ownership | One six-core cluster; two firmware roots and fabric bridge | Qualified two-cluster, 20-core layout; reserved firmware tables, one root and no fabric bridge | Same runtime behavior | `hw/t6040.rs`, `hw/t8140.rs`, `g17/mod.rs`; other fused core counts are still refused, and this audit does not expand that admission |
@@ -83,7 +84,7 @@ an offset, voltage, descriptor ABI, or Linux residency measurement.
 
 | Gated path | Exact facts needed for T6040/25G83 | Current evidence and disposition |
 | --- | --- | --- |
-| Sustained top clock | DT OPP count, both voltage lanes, hardware A/B selector maps, selected logical-state limit; independently decoded achieved frequency or residency, counter units/timebase/wrap, request versus achieved-state semantics and limiting reason under sustained load | Per-chip DT handoff and maps are already mandatory; both maps select the final raw OPP. `max_frequency_khz` is an advertised maximum, not achieved telemetry. G17 `stats_snapshot()` returns None; ring drain alone proves no residency. Keep voltages/maps unchanged and require a measured Linux load trace. |
+| Sustained top clock | DT OPP count, both voltage lanes, hardware A/B selector maps, selected logical-state limit; independently decoded achieved frequency or residency, counter units/timebase/wrap, request versus achieved-state semantics and limiting reason under sustained load | Per-chip DT handoff and maps are already mandatory; both maps select the final raw OPP. `max_frequency_khz` is an advertised maximum, not achieved telemetry. G17 `stats_snapshot()` returns None; g4 raw `firmware_reports` and `asahi_g17_report` preserve payloads but establish no decoded residency. Keep voltages/maps unchanged and require a measured Linux load trace. |
 | Raw versus logical state count | Meaning of the ADT count properties for this firmware, both SGX map banks and number of entries actually consumed by the 25G83 power tables | Public `HwData25G83`, calibration validation and loader handoff select eleven logical states from sixteen raw OPPs. Do not resize the firmware structure from the ADT property name or discard its unsorted OPPs. Compare actual top selection and achieved clock. |
 | DVFS ramp / idle / fast-die | 25G83 meaning and units of ramp/effort controls, idle/off delays, temperature limits and hysteresis; PMP/AP/CLPC request ownership, achieved floors and release under idle and load | Existing shared submission/idle policy, DT suppliers and T6040 power-state graph are enabled. Power-state presence is not proof of load tracking. Require live requests, actual floor release and thermal traces; opaque power words are not tunable parameters. |
 | Recovery slot attribution | Exact 25G83 slot-key storage range, lifetime, cache policy and slot stride; key QID/stamp bit fields; slot-mask meanings, progress monitor semantics and association with an actual started render | `recovery_slot_keys=None`; never copy T8140's physical address. Preserve firmware blame. Progress-view reads no longer depend on knowing the key address; bounded diagnostics report unknown ownership explicitly. |
@@ -103,6 +104,39 @@ expected behavior. Recovery-source tests cover unknown keys, incomplete reads
 and page-fault fallback. Diagnostic counters explicitly identify lifetime
 stampless totals; they are not a count of commands retired by one restart.
 
+
+## g4 shared runtime ports and observability
+
+The operator has selected g3 as the hardware baseline. This follow-on retains
+its CLPC/PMP ports, DT idle hold and recovery-generation release guard.
+Individual hardware records remain in the private qualification workspace;
+no raw lab capture is a public implementation source.
+
+| Gap | Public source behavior | T6040 g4 disposition | Qualification |
+| --- | --- | --- | --- |
+| #504 fragment notification | `de0b22a8370e` selects a render pair on its fragment notification; final retirement still requires both stored stamps | Included for both firmware graphs; KUnit covers each mask bank and unrelated queues | Render-light latency/IRQ rate, growth/partial renders, recovery and CTS |
+| #504 tiling first-kick | `5073eac15192` changes the word only for the 26A428 register program | Included unchanged; 25G83 retains 1 on every kick | No T6040 notification-halving claim; requires 25G83 descriptor/notification facts and controlled qualification |
+| #496 compute-fault witness | `9a76756bf2d7` uses event 7 words 3/4 as QID/stamp on Neo, with consumed-ring guard | Imported prerequisite, but the existing firmware graph keeps 25G83 event 7 unknown | Exact 25G83 layout, queue identity, stamp semantics and DMA/ring visibility must be established before it can release memory |
+| #505 closed-context teardown | `078d744a260c` kills before freeing executed unstamped render graphs, retains firmware-linked work storage, and reuses killed pairs last with QID capacity | Shared safety/retention paths included; compute-fault-driven kill depends on the graph-qualified #496 witness | Closed mixed compute/render faults, acknowledgement ordering, memory pressure and slot/QID reuse; does not claim to cure a live render's first fault |
+| First fault | Reason and blame alone cannot identify engine progress | At halted state 1, before acknowledgement, g4 logs the blamed pair's stored stamps, free-list balance and up to four commands' pass/cursor snapshots; borrowed pairs are explicitly unavailable | Correlate exact CTS operation and original error with raw event report and snapshots; do not label reason 2 as page fault without semantics |
+| Raw firmware statistics | Complete 18-word statistics records already have checked ring geometry | Read-only `firmware_reports` exposes last full sample, count and host monotonic time for each role/type. Static-key `asahi_g17_report` copies trace/statistics/event words before slot return | Match payloads to independently decoded achieved-clock/power/residency and freshness/units; legacy statistics tags are a different ABI |
+| Idle memory floor | PMGR graphics power is a supplier lifetime, not itself an idle-work witness | Existing policy retained; CLPC status now exposes the sampled graphics status/active input and read-error count alongside CPU requests and rail votes | Long idle with no GPU clients, then load and release, must distinguish GPU power, CPU demand, failed reads and other PMC agents; never infer idle from an open client alone |
+
+Remaining exact facts for telemetry are the 25G83/26A428 tag-to-layout map,
+field width/signedness/endianness, sample/timebase/wrap and freshness,
+power units/averaging interval, logical/raw/cluster pstate selection, requested
+versus achieved-state semantics, and limiting/thermal reason meanings. Raw
+samples and the DT maximum are not MHz. Reads issue no firmware request and
+never touch gated core registers. `agx_stats` remains unsupported for decoded
+G17 data until those semantics are established.
+
+For the two deterministic CTS cases, retain the first failing operation before
+cleanup, full unnormalized recovery logs, raw event trace, and pre-ack render
+snapshots. The large-buffer and extreme-point-size cases can stress tiling,
+but neither case name proves a TLB, timeout or TVB cause. No timeout, voltage,
+feature-enable or buffer-size guess is included in g4. Multi-queue sync needs
+its publish/GPU-span/event/fence timeline; #504's compute control does not
+promise to halve that path's latency.
 
 ## Source and validation boundaries
 
