@@ -31,6 +31,7 @@
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/mfd/syscon.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -125,6 +126,9 @@ struct apple_clpc {
 	unsigned long gpu_read_errors;
 };
 
+/* Protect publication/removal of provider drvdata, never a submission path. */
+static DEFINE_MUTEX(apple_clpc_clients_lock);
+
 static void apple_clpc_gpu_free(struct kref *ref)
 {
 	kfree(container_of(ref, struct apple_clpc_gpu, ref));
@@ -178,14 +182,14 @@ int apple_clpc_gpu_get(struct device *dev, struct apple_clpc_gpu **out)
 		put_device(&provider->dev);
 		return -ENOMEM;
 	}
-	device_lock(&provider->dev);
-	clpc = device_is_bound(&provider->dev) ? dev_get_drvdata(&provider->dev) : NULL;
+	mutex_lock(&apple_clpc_clients_lock);
+	clpc = dev_get_drvdata(&provider->dev);
 	if (clpc && clpc->gpu && refcount_read(&clpc->gpu->ref.refcount) == 1) {
 		kref_get(&clpc->gpu->ref);
 		*out = clpc->gpu;
 		ret = 0;
 	}
-	device_unlock(&provider->dev);
+	mutex_unlock(&apple_clpc_clients_lock);
 	put_device(&provider->dev);
 	return ret;
 }
@@ -395,8 +399,9 @@ static void apple_clpc_sample(struct apple_clpc *clpc)
 					      now);
 
 	floor = apple_clpc_floor(clpc, state);
-	if (!reason && floor)
-		reason = 16;
+	for (rail = 0; rail < APPLE_CLPC_RAILS; rail++)
+		if (state[rail] > demand[rail])
+			reason |= 16;
 	clpc->last_floor = floor;
 	clpc->last_reason = reason;
 	clpc->last_vote_ns = ktime_get_mono_fast_ns();
@@ -494,6 +499,9 @@ static void apple_clpc_stop(void *data)
 {
 	struct apple_clpc *clpc = data;
 
+	mutex_lock(&apple_clpc_clients_lock);
+	dev_set_drvdata(clpc->dev, NULL);
+	mutex_unlock(&apple_clpc_clients_lock);
 	apple_clpc_halt(clpc);
 	debugfs_remove_recursive(clpc->debugfs);
 	apple_clpc_free_clusters(clpc);
@@ -592,7 +600,9 @@ static int apple_clpc_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
+	mutex_lock(&apple_clpc_clients_lock);
 	platform_set_drvdata(pdev, clpc);
+	mutex_unlock(&apple_clpc_clients_lock);
 	apple_clpc_queue(clpc, true);
 	return 0;
 }
