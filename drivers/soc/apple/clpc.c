@@ -101,6 +101,9 @@ struct apple_clpc {
 	struct dentry *debugfs;
 	struct regmap *gpu_pmgr;
 	u32 gpu_offset;
+	u32 gpu_status;
+	bool gpu_active;
+	unsigned long gpu_read_errors;
 };
 
 /* cpufreq policies can appear after probe; pick up new ones as they do. */
@@ -254,8 +257,14 @@ static void apple_clpc_sample(struct apple_clpc *clpc)
 		/* Keep the qualified floor while graphics is powered. A failed
 		 * read must not silently starve a running graphics consumer.
 		 */
-		if (regmap_read(clpc->gpu_pmgr, clpc->gpu_offset, &status) ||
-		    (status & GENMASK(7, 4)) == GENMASK(7, 4))
+		if (regmap_read(clpc->gpu_pmgr, clpc->gpu_offset, &status)) {
+			clpc->gpu_read_errors++;
+			clpc->gpu_active = true;
+		} else {
+			clpc->gpu_status = status;
+			clpc->gpu_active = (status & GENMASK(7, 4)) == GENMASK(7, 4);
+		}
+		if (clpc->gpu_active)
 			for (rail = 0; rail < APPLE_CLPC_RAILS; rail++)
 				demand[rail] = clpc->hw->map[rail][APPLE_CLPC_LEVELS - 1];
 	}
@@ -299,6 +308,9 @@ static int apple_clpc_status_show(struct seq_file *s, void *unused)
 						   clpc->hw->rail[rail]),
 			   clpc->hw->map[rail][0], clpc->hw->map[rail][1],
 			   clpc->hw->map[rail][2], clpc->hw->map[rail][3]);
+	seq_printf(s, "gpu: present %u active %u status %#x read_errors %lu\n",
+		   !!clpc->gpu_pmgr, READ_ONCE(clpc->gpu_active),
+		   READ_ONCE(clpc->gpu_status), READ_ONCE(clpc->gpu_read_errors));
 	seq_printf(s, "samples: %lu update errors: %lu\n", clpc->samples,
 		   clpc->update_errors);
 	for (i = 0; i < clpc->nr_clusters; i++)
