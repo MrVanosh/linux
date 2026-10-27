@@ -18,6 +18,7 @@
 #include <linux/usb/typec_mux.h>
 
 #include "dcp-fabric.h"
+#include "dcp-peer-v26_6.h"
 #include "dcp-fabric-session.h"
 #include "dcp-relink.h"
 #include "dptxep.h"
@@ -270,17 +271,6 @@ struct dcp_desktop_state {
 	 * display (unplug); the next swap needs a power-on and a mode set.
 	 */
 	bool ext_pipe_off;
-	/*
-	 * Dynamic Type-C DP route (T6041 dcpext1): the DP PHYs and crossbars
-	 * of every Type-C port, the one in use (or -1), the DPTX target PHY
-	 * of each and the crossbar state selecting this processor.
-	 */
-	unsigned int ndyn;
-	int dyn_active;
-	struct phy *dyn_phy[3];
-	struct mux_control *dyn_xbar[3];
-	u32 dyn_dptx_phy[3];
-	u32 dyn_mux_index;
 };
 
 /* TODO: move IOMFB members to its own struct */
@@ -298,6 +288,36 @@ struct apple_dcp {
 	bool vblank_works_disabled;
 	struct dcp_fabric_pipeline fabric;
 	struct device *dev;
+	/* Peer DCP for dual-pipe (desktop 26.6): the primary reserves an idle
+	 * peer pipe; the peer records its owner.  Protected by dcp_peer_lock.
+	 */
+	struct apple_dcp *peer_reserved;
+	struct apple_dcp *peer_owner;
+	/*
+	 * This pipeline's Type-C display is wider than one pipe and found no
+	 * peer above it: it needs the hybrid, which was taken when it came.
+	 */
+	bool peer_starved;
+	/*
+	 * Desktop 26.x hybrid with apple,typec-hybrid-first: its HDMI display
+	 * has given the pipeline to a Type-C display wider than one pipe and
+	 * waits until that one fits one pipe again or leaves.
+	 */
+	bool hdmi_yielded;
+	/* The display on this pipeline runs a mode within one pipe. */
+	bool typec_narrow;
+	struct delayed_work hybrid_wq;
+	struct dcp_peer_tiling peer_tiling;
+	bool peer_unbinding;
+	/* Firmware display endpoint (its Disp_Index), apple,dcp-endpoint;
+	 * separate from index, which also selects the doorbell and PHY mode. */
+	u32 peer_endpoint;
+	/* Paired DRM scanout on the primary; under dcp_peer_lock. */
+	bool peer_active, peer_failed;
+	/* The DRM mode the pair was set to (timing, color mode IDs, minRR). */
+	u32 peer_mode_timing, peer_mode_color, peer_min_vrr;
+	/* On the peer: its first completion since the pair was set was logged. */
+	bool peer_complete_logged;
 	struct platform_device *piodma;
 	bool piodma_created;
 	struct iommu_domain *iommu_dom;
@@ -582,7 +602,13 @@ struct apple_dcp {
 	/* these fields are output port specific */
 	struct phy *phy;
 	struct phy *fixed_phy;
+	/*
+	 * The crossbar control a link configuration takes up and down: the
+	 * fixed output's, or on desktop 26.x the active Type-C route's.
+	 */
 	struct mux_control *xbar;
+	/* The fixed (HDMI) output's own crossbar control, selected for it. */
+	struct mux_control *fixed_xbar;
 	struct typec_mux *typec_mux;
 	struct apple_dcp_typec_route typec_routes[DCP_MAX_TYPEC_ROUTES];
 	struct apple_dcp_typec_route *active_typec_route;
@@ -707,6 +733,17 @@ struct apple_dcp {
 	/* Hardirq, resume and expiry share one generation under this lock. */
 	spinlock_t hdmi_presence_lock;
 	struct dcp_fabric_presence hdmi_presence;
+	/* The state before the current series of HPD edges began. */
+	enum dcp_fabric_presence_state hdmi_presence_prev;
+	/*
+	 * A desktop 26.x Type-C display that came back from system sleep with a
+	 * partial mode list (the sink was not ready for its EDID yet) is
+	 * connected again after a retrain found no mode.
+	 */
+	struct delayed_work link_recovery_wq;
+	unsigned int link_recovery_tries;
+	unsigned int link_recovery_snap;
+	atomic_t modesets_done;
 	unsigned long hdmi_edge_jiffies;
 	bool hdmi_edge_seen;
 	struct delayed_work hdmi_settle_wq;

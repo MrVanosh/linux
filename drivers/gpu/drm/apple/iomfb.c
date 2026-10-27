@@ -91,17 +91,6 @@ static inline u64 dcpep_ack(enum dcp_context_id id)
 }
 
 /*
- * Adaptive sync through IOMFBParameter 14 black-screens the J616s panel on
- * the desktop 26.6 firmware: the firmware accepts the VRR mode, then no swap
- * completes.  Do not offer it there.
- */
-static bool dcp_mode_vrr_supported(struct apple_dcp *dcp,
-				   const struct dcp_display_mode *mode)
-{
-	return dcp->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP || !mode->vrr;
-}
-
-/*
  * A channel is busy if we have sent a message that has yet to be
  * acked. The driver must not sent a message to a busy channel.
  */
@@ -1232,10 +1221,12 @@ void dcp_hotplug(struct work_struct *work)
 		 * callback has completed.
 		 */
 		ret = dcp_retrain_active_crtc(connector);
-		if (ret)
+		if (ret) {
 			dev_warn(dcp->dev,
 				 "failed to retrain active CRTC after hotplug: %d\n",
 				 ret);
+			dcp_link_recovery_schedule(dcp);
+		}
 	}
 
 	dcp_test_point(dcp, DCP_TEST_HOTPLUG_EVENT);
@@ -1284,11 +1275,27 @@ static void dcpep_handle_cb(struct apple_dcp *dcp, enum dcp_context_id context,
 		return;
 	}
 
+	/* The header is read below: check the record lies in the shared buffer first. */
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP &&
+	    (length < sizeof(*hdr) || offset >= 0x8000 || length > 0x8000 - offset)) {
+		dev_err(dev, "invalid IOMFB callback envelope\n");
+		dcp->crashed = true;
+		return;
+	}
+
 	tag = dcp_parse_tag(hdr->tag);
 
 
 	handled = tag >= 0 && tag < IOMFB_MAX_CB && dcp->cb_handlers &&
 		  dcp->cb_handlers[tag];
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP && handled &&
+	    ((u64)sizeof(*hdr) + hdr->in_len + hdr->out_len > length ||
+	     !iomfb_check_callback_v26_6_desktop(tag, hdr->in_len, hdr->out_len))) {
+		dev_err(dev, "short IOMFB callback %d (%u, %u, length %u)\n",
+			tag, hdr->in_len, hdr->out_len, length);
+		dcp->crashed = true;
+		return;
+	}
 	if (dcp->fw_compat == DCP_FIRMWARE_H17P &&
 	    (tag < 0 || tag >= IOMFB_MAX_CB ||
 	     (u64)sizeof(*hdr) + hdr->in_len + hdr->out_len != length ||
@@ -1947,8 +1954,6 @@ edid_done:
 			continue;
 		published_180hz |= modes[i].automatic_rgb8_quirk;
 		published++;
-		if (!dcp_mode_vrr_supported(dcp, &modes[i]))
-			continue;
 		if (modes[i].vrr) {
 			u16 lo = modes[i].min_vrr >> 16;
 			u16 hi = modes[i].max_vrr >> 16;

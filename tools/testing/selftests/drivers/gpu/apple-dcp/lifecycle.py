@@ -490,6 +490,8 @@ def bounce(root):
     m = re.search(r'^static int dcp_dptx_connect_raw\(', dcp, re.M)
     assert m, 'dcp_dptx_connect_raw'
     raw = block(dcp, m.start())
+    # Compact DPTX is the desktop 26.x wire; this scenario's endpoint is not.
+    raw = raw.replace('READ_ONCE(dcp->dptxport[port].service->ep->compact)', 'false')
 
     def swap(old, new):
         nonlocal unit
@@ -510,6 +512,8 @@ def bounce(root):
     swap(old_raw, 'static int dcp_dptx_connect_raw(struct apple_dcp *, u32, bool *' +
          (', const struct dcp_fabric_session *, bool, bool' if sessions else '') + ');')
     swap('static int dptxport_set_hpd(void *p, bool on)\n{ (void)p; assert(!on); return hpd_error; }',
+         '/* The route powers a desktop 26.x PHY at connect: nothing to do for this scenario. */\n'
+         'static int __attribute__((unused)) dcp_typec_phy_on(struct apple_dcp *d) { (void)d; return 0; }\n'
          'static bool fw_hpd, fw_display, link_trains;\n'
          'static int hpd_drops, connects, release_error_once, assert_error;\n'
          '/* A request that times out may still be carried out; a refused one is not. */\n'
@@ -1668,7 +1672,8 @@ def vrr(root):
 struct apple_connector { bool connected; };
 /* The native T6030 14.7 backend is never selected in these scenarios. */
 enum dcp_firmware_version { DCP_FIRMWARE_UNKNOWN, DCP_FIRMWARE_V_12_3, DCP_FIRMWARE_V_13_5,
-    DCP_FIRMWARE_V_14_7, DCP_FIRMWARE_V_14_7_TEMPLATE, DCP_FIRMWARE_V_26_6 };
+    DCP_FIRMWARE_V_14_7, DCP_FIRMWARE_V_14_7_TEMPLATE, DCP_FIRMWARE_V_26_6,
+    DCP_FIRMWARE_V_26_6_DESKTOP };
 struct apple_dcp {
     bool crashed, external, external_native, quiescing;
     unsigned int nr_typec_routes;
@@ -1681,14 +1686,19 @@ struct apple_dcp {
 struct platform_device { struct apple_dcp *data; };
 struct drm_crtc { struct platform_device *dcp; void *primary; };
 struct drm_display_mode { int unused; };
-struct drm_crtc_state { bool enable, vrr_enabled, modeset, color_mgmt_changed; struct drm_display_mode mode; void *ctm, *degamma_lut, *gamma_lut; unsigned plane_mask; };
+struct drm_crtc_state { bool enable, vrr_enabled, modeset, mode_changed, color_mgmt_changed; struct drm_display_mode mode; void *ctm, *degamma_lut, *gamma_lut; unsigned plane_mask; };
 /* mainline 7.2 renamed struct drm_atomic_state to struct drm_atomic_commit */
-struct drm_atomic_commit { struct drm_crtc_state crtc; };
+struct drm_atomic_commit { struct drm_crtc_state crtc, old_crtc; bool no_old_crtc; };
 #define to_apple_crtc(x) (x)
 #define platform_get_drvdata(x) ((x)->data)
 static struct drm_crtc_state *drm_atomic_get_new_crtc_state(
     struct drm_atomic_commit *s, struct drm_crtc *c)
 { (void)c; return &s->crtc; }
+/* Only the desktop 26.6 firmware compares against the old CRTC state. */
+static unsigned int old_state_lookups;
+static struct drm_crtc_state * __attribute__((unused)) drm_atomic_get_old_crtc_state(
+    struct drm_atomic_commit *s, struct drm_crtc *c)
+{ (void)c; old_state_lookups++; return s->no_old_crtc ? NULL : &s->old_crtc; }
 static bool drm_atomic_crtc_needs_modeset(struct drm_crtc_state *s)
 { return s->modeset; }
 static int __attribute__((unused)) iomfb_v14_7_atomic_check(struct apple_dcp *d,
@@ -1746,14 +1756,45 @@ int main(void)
         }
         cases++;
     }
-    dcp.crashed = true;
+    /* No other firmware turns a VRR change into a mode set. */
+    assert(!old_state_lookups && !state.crtc.mode_changed);
+DESKTOP_VRR    dcp.crashed = true;
     state.crtc.vrr_enabled = false;
     assert(dcp_crtc_atomic_check(&crtc, &state) == -EINVAL);
     printf("PASS: %u production atomic VRR admission cases and crashed-device rejection\n", cases);
     return 0;
 }
 """
-    return prefix + check + suffix
+    desktop = ''
+    if 'DCP_FIRMWARE_V_26_6_DESKTOP' in check:
+        # Desktop 26.6 applies adaptive sync with a mode set: a VRR_ENABLED
+        # change of an enabled CRTC must become one, nothing else may.
+        desktop = r"""    dcp.fw_compat = DCP_FIRMWARE_V_26_6_DESKTOP;
+    dcp.hw.iomfb_method_profile = 0;
+    dcp.mode_state.valid = true;
+    dcp.connector = &connector;
+    connector.connected = true;
+    state.crtc.modeset = false;
+    for (unsigned int enable = 0; enable < 2; enable++)
+    for (unsigned int old_vrr = 0; old_vrr < 3; old_vrr++)
+    for (unsigned int vrr = 0; vrr < 2; vrr++) {
+        state.crtc.enable = enable;
+        state.crtc.vrr_enabled = vrr;
+        state.crtc.mode_changed = false;
+        state.no_old_crtc = old_vrr == 2;
+        state.old_crtc.vrr_enabled = old_vrr == 1;
+        assert(dcp_crtc_atomic_check(&crtc, &state) == 0);
+        bool expected = enable && old_vrr != 2 && (old_vrr == 1) != vrr;
+        if (state.crtc.mode_changed != expected) {
+            fprintf(stderr, "desktop enable=%u old_vrr=%u vrr=%u: mode_changed=%d expected %d\n",
+                    enable, old_vrr, vrr, state.crtc.mode_changed, expected);
+            return 1;
+        }
+        cases++;
+    }
+    dcp.fw_compat = DCP_FIRMWARE_UNKNOWN;
+"""
+    return prefix + check + suffix.replace('DESKTOP_VRR', desktop, 1)
 
 
 def power_reply(root):
@@ -1842,6 +1883,7 @@ typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
 #define DCP_FIRMWARE_H17P 1
+#define DCP_FIRMWARE_V_26_6_DESKTOP 100
 #define DCP_IOMFB_METHODS_H17P_EXTERNAL 2
 #define DCP_IOMFB_METHODS_H17G 3
 #define DCP_MAX_CALL_DEPTH 8
@@ -1871,6 +1913,9 @@ static unsigned acks, case_tag;
 static struct dcp_channel *dcp_get_channel(struct apple_dcp *d, enum dcp_context_id c)
 { (void)c; return &d->channel; }
 static int dcp_parse_tag(char *p) { (void)p; return case_tag; }
+/* A desktop 26.6 callback is not under test here: no scenario selects that firmware. */
+static bool __attribute__((unused)) iomfb_check_callback_v26_6_desktop(int tag, u32 in_len, u32 out_len)
+{ (void)tag; (void)in_len; (void)out_len; assert(!"desktop 26.6 callback in an H17P scenario"); return false; }
 static bool of_machine_is_compatible(const char *n) { (void)n; return machine; }
 static bool of_device_is_compatible(struct device_node *n, const char *s)
 { (void)s; return n->external; }
