@@ -3010,6 +3010,15 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 	/* VRR modes need swap timestamps, see iomfb_flush(). */
 	dcp->use_timestamps = mode->vrr;
 
+	/* A display within one pipe may let the other input have a pipe again. */
+	{
+		bool narrow = crtc_state->mode.hdisplay <= DCP_DESKTOP_PIPE_MAX_WIDTH;
+
+		WRITE_ONCE(dcp->typec_narrow, narrow);
+		if (narrow)
+			dcp_fabric_hybrid_kick(dcp, 1000);
+	}
+
 	/*
 	 * A mode wider than one pipe goes to both pipes of a reserved pair,
 	 * with adaptive sync set the same on both.  The pair takes the mode's

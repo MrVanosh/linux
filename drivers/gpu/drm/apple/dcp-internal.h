@@ -298,6 +298,15 @@ struct apple_dcp {
 	 * peer above it: it needs the hybrid, which was taken when it came.
 	 */
 	bool peer_starved;
+	/*
+	 * Desktop 26.x hybrid with apple,typec-hybrid-first: its HDMI display
+	 * has given the pipeline to a Type-C display wider than one pipe and
+	 * waits until that one fits one pipe again or leaves.
+	 */
+	bool hdmi_yielded;
+	/* The display on this pipeline runs a mode within one pipe. */
+	bool typec_narrow;
+	struct delayed_work hybrid_wq;
 	struct dcp_peer_tiling peer_tiling;
 	bool peer_unbinding;
 	/* Firmware display endpoint (its Disp_Index), apple,dcp-endpoint;
