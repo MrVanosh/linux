@@ -92,6 +92,7 @@ struct apple_clpc_gpu {
 	bool active;
 	u64 updated_ns;
 	u64 sequence;
+	struct delayed_work *wake;
 };
 
 struct apple_clpc {
@@ -102,6 +103,7 @@ struct apple_clpc {
 	/* Samples while a vote is held; idle_work defers to busy CPUs. */
 	struct delayed_work work;
 	struct delayed_work idle_work;
+	struct mutex sample_lock;
 	bool stopped;
 	struct apple_clpc_cluster clusters[APPLE_CLPC_MAX_CLUSTERS];
 	unsigned int nr_clusters;
@@ -141,6 +143,11 @@ void apple_clpc_gpu_set_active(struct apple_clpc_gpu *gpu, bool active)
 	if (!gpu)
 		return;
 	spin_lock_irqsave(&gpu->lock, flags);
+	/* A cold GPU publisher must not wait for a deferrable CPU-idle timer.
+	 * Removal clears wake under this same lock before draining work.
+	 */
+	if (active && !gpu->active && gpu->wake)
+		mod_delayed_work(system_freezable_power_efficient_wq, gpu->wake, 0);
 	gpu->active = active;
 	gpu->updated_ns = ktime_get_mono_fast_ns();
 	gpu->sequence++;
@@ -334,6 +341,10 @@ static void apple_clpc_queue(struct apple_clpc *clpc, bool idle)
 	 * stops; with no vote held, sampling can wait for a CPU that wakes up
 	 * anyway rather than waking an idle one every period.
 	 */
+	/* A demand edge can queue work while the deferrable pass is pending.
+	 * Keep one sampling cadence once the serialized pass settles.
+	 */
+	cancel_delayed_work(idle ? &clpc->work : &clpc->idle_work);
 	queue_delayed_work(system_freezable_power_efficient_wq,
 			   idle ? &clpc->idle_work : &clpc->work,
 			   msecs_to_jiffies(APPLE_CLPC_SAMPLE_MS));
@@ -413,14 +424,22 @@ static void apple_clpc_sample(struct apple_clpc *clpc)
 
 static void apple_clpc_work(struct work_struct *work)
 {
-	apple_clpc_sample(container_of(to_delayed_work(work), struct apple_clpc,
-				       work));
+	struct apple_clpc *clpc = container_of(to_delayed_work(work), struct apple_clpc, work);
+
+	mutex_lock(&clpc->sample_lock);
+	if (!READ_ONCE(clpc->stopped))
+		apple_clpc_sample(clpc);
+	mutex_unlock(&clpc->sample_lock);
 }
 
 static void apple_clpc_idle_work(struct work_struct *work)
 {
-	apple_clpc_sample(container_of(to_delayed_work(work), struct apple_clpc,
-				       idle_work));
+	struct apple_clpc *clpc = container_of(to_delayed_work(work), struct apple_clpc, idle_work);
+
+	mutex_lock(&clpc->sample_lock);
+	if (!READ_ONCE(clpc->stopped))
+		apple_clpc_sample(clpc);
+	mutex_unlock(&clpc->sample_lock);
 }
 
 static int apple_clpc_status_show(struct seq_file *s, void *unused)
@@ -502,6 +521,13 @@ static void apple_clpc_stop(void *data)
 	mutex_lock(&apple_clpc_clients_lock);
 	dev_set_drvdata(clpc->dev, NULL);
 	mutex_unlock(&apple_clpc_clients_lock);
+	if (clpc->gpu) {
+		unsigned long flags;
+
+		spin_lock_irqsave(&clpc->gpu->lock, flags);
+		clpc->gpu->wake = NULL;
+		spin_unlock_irqrestore(&clpc->gpu->lock, flags);
+	}
 	apple_clpc_halt(clpc);
 	debugfs_remove_recursive(clpc->debugfs);
 	apple_clpc_free_clusters(clpc);
@@ -589,8 +615,11 @@ static int apple_clpc_probe(struct platform_device *pdev)
 			    clpc->mask;
 	apple_clpc_find_clusters(clpc);
 	clpc->next_scan = jiffies + HZ;
+	mutex_init(&clpc->sample_lock);
 	INIT_DELAYED_WORK(&clpc->work, apple_clpc_work);
 	INIT_DEFERRABLE_WORK(&clpc->idle_work, apple_clpc_idle_work);
+	if (clpc->gpu)
+		clpc->gpu->wake = &clpc->work;
 
 	clpc->debugfs = debugfs_create_dir(dev_name(dev), NULL);
 	debugfs_create_file("status", 0400, clpc->debugfs, clpc,
@@ -695,6 +724,7 @@ static const struct apple_clpc_hw apple_clpc_hw_t6040 = {
 
 #if IS_BUILTIN(CONFIG_KUNIT) && !defined(MODULE)
 #include <kunit/test.h>
+#include <linux/completion.h>
 
 static void apple_clpc_gpu_request_lifetime_test(struct kunit *test)
 {
@@ -736,7 +766,39 @@ static void apple_clpc_gpu_provider_removal_test(struct kunit *test)
 	apple_clpc_gpu_put(gpu);
 }
 
+struct apple_clpc_wake_test {
+	struct delayed_work work;
+	struct completion done;
+};
+
+static void apple_clpc_wake_complete(struct work_struct *work)
+{
+	struct apple_clpc_wake_test *wake = container_of(to_delayed_work(work),
+													struct apple_clpc_wake_test, work);
+	complete(&wake->done);
+}
+
+static void apple_clpc_gpu_cold_wake_test(struct kunit *test)
+{
+	struct apple_clpc_gpu *gpu = kzalloc_obj(*gpu);
+	struct apple_clpc_wake_test wake;
+
+	KUNIT_ASSERT_NOT_NULL(test, gpu);
+	kref_init(&gpu->ref);
+	spin_lock_init(&gpu->lock);
+	INIT_DELAYED_WORK(&wake.work, apple_clpc_wake_complete);
+	init_completion(&wake.done);
+	gpu->wake = &wake.work;
+	apple_clpc_gpu_set_active(gpu, true);
+	KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&wake.done, HZ), 0ul);
+	/* Model provider withdrawal before its work storage is destroyed. */
+	gpu->wake = NULL;
+	cancel_delayed_work_sync(&wake.work);
+	apple_clpc_gpu_put(gpu);
+}
+
 static struct kunit_case apple_clpc_cases[] = {
+	KUNIT_CASE(apple_clpc_gpu_cold_wake_test),
 	KUNIT_CASE(apple_clpc_gpu_request_lifetime_test),
 	KUNIT_CASE(apple_clpc_gpu_provider_removal_test),
 	{}
