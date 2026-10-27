@@ -530,6 +530,8 @@ static int dcp_typec_route_deactivate(struct apple_dcp_typec_route *route)
 	bool ended_attachment;
 	int ret = 0;
 
+	WRITE_ONCE(dcp->peer_starved, false);
+
 	guard(mutex)(&dcp->external_lock);
 	if (dcp_is_external_h17p(dcp) &&
 	    (dcp->external_error || (dcp->external_power_attempted && !dcp->external_stopped)))
@@ -737,6 +739,7 @@ static bool dcp_typec_keep_order(void)
 
 static void dcp_typec_pipeline_freed(void);
 static int dcp_fixed_output_select(struct apple_dcp *dcp);
+static void dcp_typec_port_attach(struct apple_dcp_typec_port *port);
 
 static bool dcp_hdmi_settle_enabled(struct apple_dcp *dcp)
 {
@@ -821,9 +824,84 @@ static bool dcp_hdmi_sample(struct apple_dcp *dcp, u64 generation, int level)
 	return accepted;
 }
 
+/*
+ * A Type-C display wider than one pipe sits on a Type-C-only pipeline,
+ * which has no peer above it, because the hybrid was taken when it came
+ * (by an HDMI display, gone since).  Move it onto the free hybrid, as a
+ * replug does, so that it gets both pipes.
+ */
+static void dcp_typec_move_starved_locked(void)
+{
+	struct apple_dcp_typec_port *port;
+
+	lockdep_assert_held(&dcp_typec_fabric_lock);
+	if (!dcp_typec_hybrid_first())
+		return;
+
+	list_for_each_entry(port, &dcp_typec_ports, link) {
+		struct apple_dcp_typec_route *owner = port->owner, *to = NULL;
+		struct apple_dcp_typec_route *route;
+		struct apple_dcp *dcp;
+
+		if (!owner || owner->tunnel || !READ_ONCE(owner->dcp->peer_starved))
+			continue;
+		list_for_each_entry(route, &port->routes, port_link) {
+			if (route != owner && route->dcp->fixed_phy &&
+			    dcp_typec_route_available(route)) {
+				to = route;
+				break;
+			}
+		}
+		if (!to)
+			continue;
+
+		dcp = owner->dcp;
+		dev_info(dcp->dev, "display wider than one pipe moves to the free %s\n",
+			 dev_name(to->dcp->dev));
+		if (dcp_dptx_disconnect_oob(to_platform_device(dcp->dev), 0))
+			continue;
+		port->preferred_route = to;
+		port->hpd = false;
+		if (dcp_typec_route_deactivate(owner))
+			continue;
+		port->owner = NULL;
+		if (dcp_typec_route_activate(to, to->xbar)) {
+			dev_warn(dcp->dev, "hybrid not taken, the display stays on its pipeline\n");
+			if (dcp_typec_route_activate(owner, owner->xbar))
+				continue;
+			to = owner;
+		}
+		port->owner = to;
+		dcp_typec_port_attach(port);
+	}
+}
+
 static void dcp_hdmi_capacity_available(void *ctx)
 {
 	dcp_typec_pipeline_freed();
+	dcp_typec_move_starved_locked();
+}
+
+/*
+ * Desktop 26.x: the HDMI display is gone (its converter's HPD fell and
+ * stayed low); its firmware reports no unplug.  Start the presence hold from
+ * here, as the edge handler of other machines does, also where presence was
+ * never tracked: when the hold expires, the desktop has let the HDMI CRTC go
+ * and the hybrid is free for a Type-C display again.
+ */
+void dcp_fabric_hdmi_unplugged(struct apple_dcp *dcp)
+{
+	unsigned long flags;
+	u64 generation;
+
+	guard(mutex)(&dcp_typec_fabric_lock);
+	generation = dcp_hdmi_edge(dcp);
+	if (!generation)
+		return;
+	spin_lock_irqsave(&dcp->hdmi_presence_lock, flags);
+	dcp->hdmi_presence_prev = DCP_FABRIC_PRESENT;
+	spin_unlock_irqrestore(&dcp->hdmi_presence_lock, flags);
+	dcp_hdmi_sample(dcp, generation, gpiod_get_value_cansleep(dcp->hdmi_hpd));
 }
 
 static void dcp_hdmi_settle_work(struct work_struct *work)
