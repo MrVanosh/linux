@@ -4417,7 +4417,7 @@ static void dcp_release_fixed_route(void *data)
 	struct apple_dcp *dcp = data;
 
 	if (dcp->fixed_route_selected) {
-		mux_control_deselect(dcp->xbar);
+		mux_control_deselect(dcp->fixed_xbar);
 		dcp->fixed_route_selected = false;
 	}
 	typec_mux_put(dcp->typec_mux);
@@ -5092,8 +5092,9 @@ static int dcp_fixed_output_error(struct apple_dcp *dcp, int err, const char *wh
 	dev_err(dcp->dev, "HDMI output unusable (%s: %d); USB-C displays are not affected\n",
 		what, err);
 	if (dcp->fixed_route_selected)
-		mux_control_deselect(dcp->xbar);
+		mux_control_deselect(dcp->fixed_xbar);
 	dcp->fixed_route_selected = false;
+	dcp->fixed_xbar = NULL;
 	dcp->xbar = NULL;
 	if (!IS_ERR_OR_NULL(dcp->typec_mux))
 		typec_mux_put(dcp->typec_mux);
@@ -5505,7 +5506,8 @@ static int dcp_platform_probe_pipe(struct platform_device *pdev)
 			ret = devm_add_action_or_reset(dev, dcp_release_fixed_route, dcp);
 			if (ret)
 				return ret;
-			ret = mux_control_select(dcp->xbar, mux_index);
+			dcp->fixed_xbar = dcp->xbar;
+			ret = mux_control_select(dcp->fixed_xbar, mux_index);
 			if (ret)
 				dev_warn(dev, "mux_control_select failed: %d\n", ret);
 			else

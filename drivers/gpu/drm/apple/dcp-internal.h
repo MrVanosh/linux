@@ -588,7 +588,13 @@ struct apple_dcp {
 	/* these fields are output port specific */
 	struct phy *phy;
 	struct phy *fixed_phy;
+	/*
+	 * The crossbar control a link configuration takes up and down: the
+	 * fixed output's, or on desktop 26.x the active Type-C route's.
+	 */
 	struct mux_control *xbar;
+	/* The fixed (HDMI) output's own crossbar control, selected for it. */
+	struct mux_control *fixed_xbar;
 	struct typec_mux *typec_mux;
 	struct apple_dcp_typec_route typec_routes[DCP_MAX_TYPEC_ROUTES];
 	struct apple_dcp_typec_route *active_typec_route;
