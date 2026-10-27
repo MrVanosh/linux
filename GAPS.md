@@ -107,6 +107,45 @@ and page-fault fallback. Diagnostic counters explicitly identify lifetime
 stampless totals; they are not a count of commands retired by one restart.
 
 
+## g5 recovery evidence and host-hop timing
+
+The shared recovery service previously captured slot keys and monitors at
+halted state 1, then called `render_pass_started()` during classification
+after acknowledging state 3 to 0. A resumed render could change that pass
+state. G5 computes attribution from the state-1 pass snapshot and carries
+only that result through the handshake. KUnit drives the real service and
+rejects any pass read after the first acknowledgement. Unknown 25G83 keys
+still retain firmware blame. This is an independently demonstrated ordering
+fix; it does not establish the cause of either deterministic reason-2 fault.
+
+G5 adds the existing declared TVB state (inventory, page capacity, producer,
+consumer, high-water and reset) to the halted snapshot without resetting any
+counter. The blamed pair's first four commands include render geometry and
+the computed GTP layout, alongside the existing pass/cursor/stamp records.
+Pending/active growth and its reply remain visible. The next isolated run
+can distinguish exhausted inventory or delayed growth from a pass that never
+started; no buffer enlargement or firmware timeout change is justified yet.
+
+Static-key `asahi_g17_inputs` records compute input conversion entry/result,
+source count and publication waits. `asahi_g17_schedule` records enqueue,
+inline/fallback, preparation and run boundaries. Together with the existing
+publish/complete, DMA-fence and scheduler tracepoints these split host cost
+per hop into input resolution, scheduler setup/wait/dispatch and firmware
+execution. They make no timing claim until a matched trace is captured.
+
+The available macOS reference uses 26A428 on T6040 and reports a software
+request P10 while hardware residency is 1578 MHz at raw state 14. Linux runs
+the admitted 25G83 image. Thus neither a literal P10 conversion nor copying
+another firmware's statistics layout proves achieved MHz. The reference
+contains aggregate frequency/residency and public DT/calibration facts,
+not a Linux 25G83 tag/field decoder. The inspected licensed public G17 source
+at `jgoyvaerts/linux` `cc32473a09dd` also has no decoded statistics adapter.
+Required input remains a fresh Linux raw report series under labeled idle,
+ALU and fill load, and independently established field/timebase/achieved-state
+semantics for that exact firmware. No captured raw payload has been promoted
+to public implementation data. Achieved clock/power and the CTS cure remain
+open; g3's measured memory/latency policy is preserved.
+
 ## g4 shared runtime ports and observability
 
 The operator has selected g3 as the hardware baseline. This follow-on retains
