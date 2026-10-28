@@ -202,41 +202,6 @@ static inline u64 dcpep_ack(enum dcp_context_id id)
 	return dcpep_msg(id, 0, 0) | IOMFB_MSG_ACK;
 }
 
-bool dcp_desktop_vrr_supported(struct apple_dcp *dcp)
-{
-	if (dcp->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP ||
-	    READ_ONCE(dcp->desktop->vrr_failed))
-		return false;
-
-	/* External processors advertise VRR on their sink modes, not a panel. */
-	if (!dcp->main_display)
-		return !dcp_has_panel(dcp);
-
-	return dcp_has_panel(dcp) && dcp->panel.has_vrr;
-}
-
-int dcp_desktop_vrr_check(struct apple_dcp *dcp, struct drm_crtc_state *state)
-{
-	struct dcp_display_mode mode;
-
-	if (dcp->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP || !state->vrr_enabled)
-		return 0;
-	/* Let the recovery commit re-apply an existing VRR state at fixed refresh. */
-	if (READ_ONCE(dcp->desktop->vrr_failed))
-		return 0;
-	if (!dcp_desktop_vrr_supported(dcp) ||
-	    !lookup_mode(dcp, &state->mode, &mode) || !mode.vrr)
-		return -EINVAL;
-	return 0;
-}
-
-static bool dcp_mode_vrr_supported(struct apple_dcp *dcp,
-				   const struct dcp_display_mode *mode)
-{
-	return dcp->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP ||
-		dcp_desktop_vrr_supported(dcp);
-}
-
 /*
  * A channel is busy if we have sent a message that has yet to be
  * acked. The driver must not sent a message to a busy channel.
@@ -1368,10 +1333,12 @@ void dcp_hotplug(struct work_struct *work)
 		 * callback has completed.
 		 */
 		ret = dcp_retrain_active_crtc(connector);
-		if (ret)
+		if (ret) {
 			dev_warn(dcp->dev,
 				 "failed to retrain active CRTC after hotplug: %d\n",
 				 ret);
+			dcp_link_recovery_schedule(dcp);
+		}
 	}
 
 	dcp_test_point(dcp, DCP_TEST_HOTPLUG_EVENT);
@@ -2123,8 +2090,6 @@ edid_done:
 			continue;
 		published_180hz |= modes[i].automatic_rgb8_quirk;
 		published++;
-		if (!dcp_mode_vrr_supported(dcp, &modes[i]))
-			continue;
 		if (modes[i].vrr) {
 			u16 lo = DIV_ROUND_UP(modes[i].min_vrr, 1U << 16);
 			u16 hi = modes[i].max_vrr >> 16;
@@ -2439,9 +2404,7 @@ int dcp_crtc_atomic_modeset(struct drm_crtc *crtc,
 		return 0;
 
 	modeset = drm_atomic_crtc_needs_modeset(crtc_state) ||
-		  !READ_ONCE(dcp->mode_state.valid) ||
-		  (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP &&
-		   crtc_state->vrr_enabled != dcp->desktop->vrr_requested);
+		  !READ_ONCE(dcp->mode_state.valid);
 
 	if (!modeset)
 		return 0;

@@ -217,6 +217,7 @@ static const iomfb_cb_handler cb_handlers[IOMFB_MAX_CB] = {
 	[114] = trampoline_passthrough_dict_v26_6,
 	/* set_tiling_state: the value followed by success */
 	[115] = trampoline_get_tiling_state,
+	[116] = trampoline_set_tiling_state_v26_6,
 	[121] = dcpep_cb_boot_1, /* start_hardware_boot */
 	[122] = trampoline_false, /* is_dark_boot / is_waking_from_hibernate */
 	[123] = trampoline_false,
@@ -300,6 +301,7 @@ static const struct dcp_cb_min_v26_6_desktop cb_min[IOMFB_MAX_CB] = {
 		       sizeof(struct dcp_dict_passthrough_resp_v26_6)),
 	[115] = CB_MIN(sizeof(struct dcpep_get_tiling_state_req),
 		       sizeof(struct dcpep_get_tiling_state_resp)),
+	[116] = CB_MIN(sizeof(struct dcpep_get_tiling_state_req), sizeof(u32)),
 	[121] = CB_MIN(0, 0),
 	[122] = CB_MIN(0, sizeof(u8)),
 	[123] = CB_MIN(0, sizeof(u8)),

@@ -426,6 +426,10 @@ static void dcpep_cb_swap_complete(struct apple_dcp *dcp,
 	ktime_t now = ktime_get();
 	bool retire = true;
 
+#if DCP_FW_DESKTOP_26(DCP_FW_VER)
+	if (dcp_peer_swap_complete_26_6(dcp, resp->swap_id))
+		return;
+#endif
 #if DCP_FW_H17(DCP_FW_VER)
 	if (dcp->hw.iomfb_method_profile != DCP_IOMFB_METHODS_H17G &&
 	    !dcp_present_complete_h17p(&dcp->present_state_h17p, resp->swap_id)) {
@@ -468,6 +472,7 @@ static void dcpep_cb_swap_complete(struct apple_dcp *dcp,
 #endif
 	trace_iomfb_swap_complete(dcp, resp->swap_id);
 	dcp->last_swap_id = resp->swap_id;
+	dcp->have_swap_complete = true;
 	dcp_swap_watchdog_complete(dcp);
 	if (retire) {
 		dcp_release_retained_framebuffers(dcp, resp->swap_id);
@@ -2178,6 +2183,15 @@ void DCP_FW_NAME(iomfb_poweroff)(struct apple_dcp *dcp)
 		return;
 #endif
 
+#if DCP_FW_DESKTOP_26(DCP_FW_VER)
+	/* A merged pair stops as a pair; its clear swap would not complete. */
+	ret = dcp_peer_stop_26_6(dcp);
+	if (ret < 0)
+		dev_err(dcp->dev, "paired power-off failed: %d\n", ret);
+	if (ret > 0)
+		goto peer_stopped;
+#endif
+
 	cookie = kzalloc(sizeof(*cookie), GFP_KERNEL);
 	if (!cookie)
 		return;
@@ -2217,6 +2231,9 @@ void DCP_FW_NAME(iomfb_poweroff)(struct apple_dcp *dcp)
 		dev_dbg(dcp->dev, "%s: clear swap submitted: %u\n", __func__,
 			swap_id);
 
+#if DCP_FW_DESKTOP_26(DCP_FW_VER)
+peer_stopped:
+#endif
 	poff_cookie = kzalloc(sizeof(*poff_cookie), GFP_KERNEL);
 	if (!poff_cookie)
 		return;
@@ -2307,6 +2324,12 @@ void DCP_FW_NAME(iomfb_sleep)(struct apple_dcp *dcp)
 #if DCP_FW_H17(DCP_FW_VER)
 	if (dcp->hw.iomfb_method_profile != DCP_IOMFB_METHODS_H17G)
 		return;
+#endif
+
+#if DCP_FW_DESKTOP_26(DCP_FW_VER)
+	ret = dcp_peer_stop_26_6(dcp);
+	if (ret < 0)
+		dev_err(dcp->dev, "paired sleep failed: %d\n", ret);
 #endif
 
 	cookie = kzalloc(sizeof(*cookie), GFP_KERNEL);
@@ -2425,6 +2448,24 @@ dcpep_cb_hotplug_v26_6(struct apple_dcp *dcp, struct dcp_hotplug_req_v26_6 *req)
 {
 	struct dcp_hotplug_resp_v26_6 resp = { 0 };
 	u64 connected = req->connected;
+	const u8 *tiled = req->opaque;
+	bool tiled_valid = !(req->opaque[sizeof(resp.opaque)] & 1);
+	bool paired = READ_ONCE(dcp->peer_reserved) || READ_ONCE(dcp->peer_owner);
+
+	/*
+	 * With a peer reserved, the record names this pipe's and the related
+	 * pipe's display at 0x3b and 0x47, as on firmware 27; it is echoed
+	 * back as that firmware's client does.
+	 */
+	if (paired) {
+		dev_dbg(dcp->dev, "peer HPD connected=%llu null=%u rec=%*ph\n",
+			connected, req->opaque[sizeof(resp.opaque)],
+			(int)sizeof(resp.opaque), tiled);
+		if (tiled_valid && connected &&
+		    !(get_unaligned_le32(tiled + 0xc) & BIT(3)))
+			dcp_peer_display_ids(dcp, get_unaligned_le32(tiled + 0x3b),
+					     get_unaligned_le32(tiled + 0x47));
+	}
 
 	/* A display that went away is bootstrapped again on its next mode. */
 	if (!dcp->main_display &&
@@ -2437,7 +2478,9 @@ dcpep_cb_hotplug_v26_6(struct apple_dcp *dcp, struct dcp_hotplug_req_v26_6 *req)
 
 	dcpep_cb_hotplug(dcp, &connected);
 
-	if (connected)
+	if (paired && tiled_valid)
+		memcpy(resp.opaque, tiled, sizeof(resp.opaque));
+	else if (connected)
 		memset(&resp.opaque[0x47], 0xff, sizeof(u32));
 
 	return resp;
@@ -2495,11 +2538,41 @@ static struct dcpep_get_tiling_state_resp
 dcpep_cb_get_tiling_state(struct apple_dcp *dcp,
 			  struct dcpep_get_tiling_state_req *req)
 {
+#if DCP_FW_DESKTOP_26(DCP_FW_VER)
+	/* D115 reads the tiling state of a paired pipe; D116 writes it. */
+	u32 value = req->value;
+	bool handled = dcp_peer_tiling_state_26_6(dcp, false, req->event,
+						  req->param, &value);
+
+	dev_dbg(dcp->dev, "peer tiling get event %u param %u value %u handled %d\n",
+		req->event, req->param, value, handled);
+	if (handled)
+		return (struct dcpep_get_tiling_state_resp){
+			.value = value,
+			.ret = 1,
+		};
+#endif
 	return (struct dcpep_get_tiling_state_resp){
 		.value = 0,
 		.ret = 1,
 	};
 }
+
+#if DCP_FW_DESKTOP_26(DCP_FW_VER)
+/* D116 set_tiling_state: the D115 record in, a boolean (padded to 4) out. */
+static u32 dcpep_cb_set_tiling_state_v26_6(struct apple_dcp *dcp,
+					   struct dcpep_get_tiling_state_req *req)
+{
+	u32 value = req->value;
+	bool handled = !req->value_null &&
+		       dcp_peer_tiling_state_26_6(dcp, true, req->event,
+						  req->param, &value);
+
+	dev_dbg(dcp->dev, "peer tiling set event %u param %u value %u null %u handled %d\n",
+		req->event, req->param, req->value, req->value_null, handled);
+	return handled;
+}
+#endif
 
 static u8 dcpep_cb_create_backlight_service(struct apple_dcp *dcp)
 {
@@ -2588,6 +2661,10 @@ TRAMPOLINE_IN(trampoline_pr_publish, iomfb_cb_pr_publish,
 	      struct iomfb_property);
 TRAMPOLINE_INOUT(trampoline_get_tiling_state, dcpep_cb_get_tiling_state,
 		 struct dcpep_get_tiling_state_req, struct dcpep_get_tiling_state_resp);
+#if DCP_FW_DESKTOP_26(DCP_FW_VER)
+TRAMPOLINE_INOUT(trampoline_set_tiling_state_v26_6, dcpep_cb_set_tiling_state_v26_6,
+		 struct dcpep_get_tiling_state_req, u32);
+#endif
 TRAMPOLINE_OUT(trampoline_create_backlight_service, dcpep_cb_create_backlight_service, u8);
 
 /*
@@ -2661,6 +2738,9 @@ static void dcp_swap_started(struct apple_dcp *dcp, void *data, void *cookie)
 #endif
 	trace_iomfb_swap_submit(dcp, resp->swap_id);
 	dcp_h17p_prepare_swap(dcp);
+#if DCP_FW_DESKTOP_26(DCP_FW_VER)
+	dcp_peer_swap_submit_26_6(dcp, &DCP_FW_SWAP(dcp), resp->swap_id);
+#endif
 	dcp_swap_submit(dcp, false, &DCP_FW_SWAP(dcp), dcp_swapped, NULL);
 }
 
@@ -2866,10 +2946,8 @@ struct dcp_modeset_cookie {
 	struct dcp_set_digital_out_mode_req actual;
 	struct dcp_set_digital_out_mode_req bootstrap;
 	bool use_bootstrap;
+	/* Adaptive sync is programmed on (a nonzero minimum rate). */
 	bool vrr;
-	bool program_sync;
-	bool notify_vrr_failure;
-	u32 min_vrr;
 };
 
 /* Finish only after the RPC which contained the unknown callback has replied. */
@@ -2905,30 +2983,11 @@ static void dcp_get_mode_info(struct apple_dcp *dcp,
 		 sizeof(struct dcp_get_mode_info_resp_v26_6), &req, cb, cookie);
 }
 
-static void dcp_modeset_select(struct apple_dcp *dcp, void *out, void *cookie);
-static void dcp_modeset_sync(struct apple_dcp *dcp, void *cookie);
-
-static void dcp_modeset_fixed_fallback(struct apple_dcp *dcp,
-				       struct dcp_modeset_cookie *modeset)
-{
-	dev_warn(dcp->dev, "adaptive sync failed, restoring fixed refresh\n");
-	WRITE_ONCE(dcp->desktop->vrr_failed, true);
-	modeset->vrr = false;
-	modeset->notify_vrr_failure = true;
-	dcp_modeset_sync(dcp, modeset);
-}
-
 static void dcp_modeset_actual_done(struct apple_dcp *dcp, void *data,
 				    void *cookie)
 {
-	struct dcp_modeset_cookie *modeset = cookie;
-
 	if (dcp_modeset_callback_failed(dcp, cookie))
 		return;
-	if (data && get_unaligned_le32(data) && modeset->vrr) {
-		dcp_modeset_fixed_fallback(dcp, modeset);
-		return;
-	}
 	complete_set_digital_out_mode(dcp, data, cookie);
 }
 
@@ -2990,38 +3049,6 @@ static void dcp_modeset_select(struct apple_dcp *dcp, void *out, void *cookie)
 				  dcp_modeset_after_actual_info, cookie);
 }
 
-static void dcp_modeset_sync_done(struct apple_dcp *dcp, void *data,
-				  void *cookie)
-{
-	struct dcp_modeset_cookie *modeset = cookie;
-
-	if (dcp_modeset_callback_failed(dcp, cookie))
-		return;
-	if (!data || get_unaligned_le32(data)) {
-		if (data && modeset->vrr) {
-			dcp_modeset_fixed_fallback(dcp, modeset);
-			return;
-		}
-		complete_set_digital_out_mode(dcp, data, cookie);
-		return;
-	}
-	dcp_modeset_select(dcp, NULL, cookie);
-}
-
-static void dcp_modeset_sync(struct apple_dcp *dcp, void *cookie)
-{
-	struct dcp_modeset_cookie *modeset = cookie;
-	struct dcp_set_parameter_dcp param;
-
-	/* Match the desktop parameter record, including its unused padding. */
-	memset(&param, 0xaa, sizeof(param));
-	param.param = IOMFBPARAM_ADAPTIVE_SYNC;
-	memset(param.value, 0, 3 * sizeof(u64));
-	param.value[0] = modeset->vrr ? modeset->min_vrr : 0;
-	param.count = 3;
-	dcp_set_parameter_dcp(dcp, false, &param, dcp_modeset_sync_done, cookie);
-}
-
 int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 			       struct drm_crtc_state *crtc_state)
 {
@@ -3066,9 +3093,43 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 		.timing_mode_id = mode->timing_mode_id
 	};
 
-	/* ProMotion needs desktop timestamps in fixed-120 mode too. */
+	/* VRR modes need swap timestamps, see iomfb_flush(); ProMotion fixed 120 too. */
 	dcp->use_timestamps = mode->needs_timestamps;
-	dcp->desktop->vrr_requested = crtc_state->vrr_enabled;
+
+	/* A display within one pipe may let the other input have a pipe again. */
+	{
+		bool narrow = crtc_state->mode.hdisplay <= DCP_DESKTOP_PIPE_MAX_WIDTH;
+
+		WRITE_ONCE(dcp->typec_narrow, narrow);
+		if (narrow)
+			dcp_fabric_hybrid_kick(dcp, 1000);
+	}
+
+	/*
+	 * A mode wider than one pipe goes to both pipes of a reserved pair,
+	 * with adaptive sync set the same on both.  The pair takes the mode's
+	 * VRR range from its first install, whatever the CRTC asks: switching
+	 * VRR on later would stop and install the pair again, and an install
+	 * that fails (the sink dropped its link meanwhile) leaves the display
+	 * dark.  Swaps keep their timestamps, so the compositor still paces it.
+	 */
+	if (!dcp->main_display) {
+		dev_dbg(dcp->dev, "modeset %ux%u vrr %u min %#x enabled %u\n",
+			crtc_state->mode.hdisplay, crtc_state->mode.vdisplay,
+			mode->vrr, mode->min_vrr, crtc_state->vrr_enabled);
+		ret = dcp_peer_drm_modeset_26_6(dcp, crtc_state->mode.hdisplay,
+						mode->timing_mode_id,
+						mode->color_mode_id,
+						mode->vrr ? mode->min_vrr : 0);
+		if (ret != -EOPNOTSUPP) {
+			dcp->desktop->mode_live = !ret;
+			/* The pair runs with the mode's adaptive-sync rate. */
+			dcp->vrr_enabled = !ret && mode->vrr;
+			if (!ret)
+				atomic_inc(&dcp->modesets_done);
+			return ret;
+		}
+	}
 
 	/*
 	 * The firmware changes a fixed panel's mode through the swap geometry,
@@ -3086,16 +3147,9 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 		return -ENOMEM;
 	cookie = &modeset->wait;
 	modeset->actual = dcp->mode;
-	modeset->program_sync =
-		(dcp_has_panel(dcp) && dcp->main_display &&
-		 (dcp_desktop_vrr_supported(dcp) || dcp->vrr_enabled ||
-		  READ_ONCE(dcp->desktop->vrr_failed))) ||
-		(!dcp->main_display &&
-		 (mode->vrr || dcp->vrr_enabled ||
-		  READ_ONCE(dcp->desktop->vrr_failed)));
-	modeset->vrr = modeset->program_sync && mode->vrr &&
-		       crtc_state->vrr_enabled && dcp_desktop_vrr_supported(dcp);
-	modeset->min_vrr = mode->min_vrr;
+	/* After an adaptive swap timed out (dcp_swap_watchdog), stay fixed. */
+	modeset->vrr = mode->vrr && crtc_state->vrr_enabled &&
+		       !READ_ONCE(dcp->desktop->vrr_failed);
 
 	cookie->status = ~0U;
 	init_completion(&cookie->done);
@@ -3120,10 +3174,24 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 
 	WRITE_ONCE(dcp->desktop->modeset_callback_error, false);
 	WRITE_ONCE(dcp->desktop->modeset_active, true);
-	if (modeset->program_sync)
-		dcp_modeset_sync(dcp, cookie);
-	else
+	/*
+	 * Adaptive sync (IOMFBParameter 14, minimum rate in 16.16 Hz, 0 = off)
+	 * goes before the mode is selected; the firmware then reports the mode
+	 * set with VRR on.  A fixed mode after adaptive sync was on turns it
+	 * off explicitly.
+	 */
+	if (mode->vrr || dcp->vrr_enabled) {
+		struct dcp_set_parameter_dcp param = {
+			.param = IOMFBPARAM_ADAPTIVE_SYNC,
+			.value = { modeset->vrr ? mode->min_vrr : 0 },
+			.count = 3,
+		};
+
+		dcp_set_parameter_dcp(dcp, false, &param, dcp_modeset_select,
+				      cookie);
+	} else {
 		dcp_modeset_select(dcp, NULL, cookie);
+	}
 
 	/*
 	 * The DCP firmware has an internal timeout of ~8 seconds for
@@ -3158,11 +3226,11 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 	}
 	WRITE_ONCE(dcp->desktop->modeset_active, false);
 	dcp->vrr_enabled = !ret && modeset->vrr;
-	if (modeset->notify_vrr_failure && dcp->connector)
-		dcp_queue_hotplug(dcp->connector);
 	kref_put(&cookie->refcount, release_wait_cookie);
 
 	dcp->desktop->mode_live = !ret;
+	if (!ret)
+		atomic_inc(&dcp->modesets_done);
 	return ret;
 }
 #else

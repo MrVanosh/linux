@@ -13,7 +13,8 @@ import os
 import subprocess
 import tempfile
 
-ROOT = Path(__file__).resolve().parents[2] / 'drivers/gpu/drm/asahi/g17'
+ROOT = Path(os.environ.get('G17_ROOT',
+                           Path(__file__).resolve().parents[2] / 'drivers/gpu/drm/asahi/g17'))
 
 
 def item(source, signature):
@@ -75,9 +76,16 @@ def check_guards():
     ordered(item(submit, 'fn wait_render_busy('), 'WORK_RING_WAIT_NS',
             'self.shared.queue_events();', 'self.wait_domain(')
     ordered(item(submit, 'fn wait_domain('), 'if remaining == 0', 'return Err(ETIMEDOUT);', 'domain.block(')
-    for name, path in [('take_pair', 'runtime/render.rs'), ('take_render_observation', 'runtime/render/observe.rs')]:
-        body = item((ROOT / path).read_text(), f'fn {name}(')
-        ordered(body, 'entry.borrowed_switch = pair.switch_in_flight();', 'entry.pair.take()')
+    borrowed = item((ROOT / 'runtime/render.rs').read_text(), 'fn take_pair(')
+    ordered(borrowed, 'entry.borrowed_switch = pair.switch_in_flight();',
+            'entry.pair.take()')
+    # The current event collector observes and retires the pair under one
+    # device-mutex hold; it no longer borrows it through a second take path.
+    observed = item((ROOT / 'runtime/render/observe.rs').read_text(),
+                    'fn observe_renders(')
+    ordered(observed, 'let mut state = self.state.lock();',
+            'firmware.next_render_observation(cursor)?', '.observe_front()',
+            'pair.retire_observed(')
     print('PASS guard placement: rebind decision, rebind commit, first publication, switch record, borrows, parked scheduler, compute owner changes, busy wait')
 
 
@@ -111,7 +119,10 @@ impl Context {
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase { Deferred, Draining, Released(u32) }
-struct Entry { context: Arc<Context>, phase: Phase, armed: u64, announce_pending: bool }
+struct Entry {
+    context: Arc<Context>, phase: Phase, armed: u64, announce_pending: bool,
+    render_kill: Option<()>, kill_wait: Option<(u64, bool)>, kill_refused: bool,
+}
 struct Pending { entries: Vec<Entry> }
 impl Pending {
 PENDING

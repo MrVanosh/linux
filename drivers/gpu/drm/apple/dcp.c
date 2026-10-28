@@ -64,6 +64,7 @@
 #include "dcp-external-bw.h"
 #include "dptx-service.h"
 #include "iomfb.h"
+#include "iomfb_internal.h"
 #include "iomfb_m4.h"
 #include "ibootep.h"
 #include "parser.h"
@@ -233,6 +234,9 @@ bool dcp_t6041_ext_enabled(void)
 {
 	return t6041_dcpext;
 }
+
+#include "iomfb_v26_6_swap.h"
+#include "dcp-peer-v26_6.inc"
 
 /*
  * The backlight maximum of a desktop 26.x panel whose node has no
@@ -1440,8 +1444,14 @@ int dcp_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_commit *commi
 	    crtc_state->vrr_enabled)
 		return -EINVAL;
 
-	if (dcp_desktop_vrr_check(dcp, crtc_state))
-		return -EINVAL;
+	/* The desktop 26.6 firmware applies adaptive sync with a mode set. */
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP && crtc_state->enable) {
+		struct drm_crtc_state *old =
+			drm_atomic_get_old_crtc_state(commit, crtc);
+
+		if (old && old->vrr_enabled != crtc_state->vrr_enabled)
+			crtc_state->mode_changed = true;
+	}
 
 	/* DRM core only caps the blob size; the gamma update copies a full table. */
 	if (crtc_state->color_mgmt_changed && crtc_state->gamma_lut &&
@@ -2237,24 +2247,58 @@ static int dcp_desktop_dptx_disconnect_oob(struct apple_dcp *dcp, u32 port)
 }
 
 /*
- * HDMI HPD of a desktop 26.x external processor.  A disconnect is left to
- * the firmware, which detects it itself.  A cold plug after boot finds the
- * port connected without a sink: the firmware never saw this HPD, so pulse
- * the AP-asserted HPD to make it export the modes now.
+ * HDMI HPD of a desktop 26.x external processor.  A cold plug after boot
+ * finds the port connected without a sink: the firmware never saw this HPD,
+ * so pulse the AP-asserted HPD to make it export the modes now.  An unplug
+ * is reported by nothing else: the DP-to-HDMI converter keeps its DP link
+ * up without a sink and the firmware sees no change.
  */
+/* The HDMI display gives its pipeline up: report it gone, release its link. */
+void dcp_hdmi_yield_link(struct apple_dcp *dcp)
+{
+	int tries = 5, ret;
+
+	disconnected_hpd_event(dcp->connector);
+	/* A link the firmware keeps retrying is released between attempts. */
+	while ((ret = dcp_dptx_disconnect(dcp, 0)) && --tries)
+		msleep(600);
+	if (ret)
+		dev_warn(dcp->dev, "HDMI link not released: %d\n", ret);
+}
+
 irqreturn_t dcp_desktop_dp2hdmi_hpd(struct apple_dcp *dcp)
 {
 	struct dptx_port *dptx = &dcp->dptxport[0];
-	bool connected = gpiod_get_value_cansleep(dcp->hdmi_hpd);
+	bool connected;
 	int ret;
 
-	if (connected) {
-		msleep(500);
-		connected = gpiod_get_value_cansleep(dcp->hdmi_hpd);
-	}
+	msleep(500);
+	connected = gpiod_get_value_cansleep(dcp->hdmi_hpd);
 	dev_dbg(dcp->dev, "DP2HDMI HPD irq, connected:%d after 500 ms\n", connected);
-	if (!connected)
+	if (!connected) {
+		/*
+		 * A yield outlasts HDMI blinks (a monitor reconfiguring its
+		 * inputs drops HPD on all of them): it ends with the Type-C
+		 * display, not with HPD here.
+		 */
+		if (!READ_ONCE(dcp->active_typec_route) && dcp->connector &&
+		    READ_ONCE(dcp->connector->connected)) {
+			dev_info(dcp->dev, "HDMI display unplugged\n");
+			disconnected_hpd_event(dcp->connector);
+			dcp_dptx_disconnect(dcp, 0);
+			dcp_fabric_hdmi_unplugged(dcp);
+		}
 		return IRQ_HANDLED;
+	}
+	/*
+	 * The pipeline drives a Type-C display, or is about to: the HDMI
+	 * display waits for it, and gets it back once that one fits one pipe.
+	 */
+	if (READ_ONCE(dcp->active_typec_route) || READ_ONCE(dcp->hdmi_yielded)) {
+		dev_info(dcp->dev, "HDMI display waits: its pipeline drives a Type-C display\n");
+		dcp_fabric_hybrid_kick(dcp, 1000);
+		return IRQ_HANDLED;
+	}
 
 	mutex_lock(&dcp->hpd_mutex);
 	if (dptx_service_available(dptx) && dptx->connected &&
@@ -2553,6 +2597,43 @@ static void dcp_placeholder_edid_work(struct work_struct *work)
 out_unlock:
 	WRITE_ONCE(dcp->typec_hpd_held, false);
 	mutex_unlock(&dcp->hpd_mutex);
+}
+
+#define DCP_LINK_RECOVERY_TRIES		4
+#define DCP_LINK_RECOVERY_DELAY_MS	2000
+
+/*
+ * A retrain after a hotplug found no mode for the active CRTC: the sink's
+ * EDID was incomplete (it had just woken from sleep and listed only its base
+ * modes).  Nothing re-reads it until the next HPD event, which can be a
+ * minute away, so a Type-C display stays at a fallback mode.  Connect the
+ * link again, as a replug does, unless a mode set completed in between.
+ */
+void dcp_link_recovery_schedule(struct apple_dcp *dcp)
+{
+	if (dcp->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP || dcp->main_display ||
+	    !dcp_is_typec_output(dcp) || !READ_ONCE(dcp->typec_cable_connected) ||
+	    dcp->link_recovery_tries >= DCP_LINK_RECOVERY_TRIES)
+		return;
+	dcp->link_recovery_snap = atomic_read(&dcp->modesets_done);
+	mod_delayed_work(system_freezable_wq, &dcp->link_recovery_wq,
+			 msecs_to_jiffies(DCP_LINK_RECOVERY_DELAY_MS));
+}
+
+static void dcp_link_recovery_work(struct work_struct *work)
+{
+	struct apple_dcp *dcp = container_of(to_delayed_work(work),
+					     struct apple_dcp, link_recovery_wq);
+	struct platform_device *pdev = to_platform_device(dcp->dev);
+
+	if (!READ_ONCE(dcp->typec_cable_connected) ||
+	    atomic_read(&dcp->modesets_done) != dcp->link_recovery_snap)
+		return;
+	dev_info(dcp->dev, "link recovery %u: connecting again after a retrain that found no mode\n",
+		 ++dcp->link_recovery_tries);
+	dcp_dptx_disconnect_oob(pdev, 0);
+	msleep(500);
+	dcp_dptx_connect_oob(pdev, 0);
 }
 
 static void dcp_typec_reconnect_work(struct work_struct *work)
@@ -2858,6 +2939,8 @@ int dcp_dptx_disconnect(struct apple_dcp *dcp, u32 port)
 	if (!ret)
 		WRITE_ONCE(dcp->dptxport[port].tile_hint, false);
 	mutex_unlock(&dcp->hpd_mutex);
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP && !port)
+		dcp_peer_release_26_6(dcp);
 
 	return ret;
 }
@@ -3649,9 +3732,9 @@ static int dcp_enable_dp2hdmi_hpd(struct apple_dcp *dcp)
 		bool connected = gpiod_get_value_cansleep(dcp->hdmi_hpd);
 		dev_info(dcp->dev, "%s: DP2HDMI HPD connected:%d\n", __func__, connected);
 
-		if (connected)
+		if (connected && !READ_ONCE(dcp->hdmi_yielded))
 			dcp_dptx_connect(dcp, 0);
-		else
+		else if (!connected)
 			_dcp_poweroff(dcp);
 	}
 
@@ -3856,7 +3939,8 @@ void dcp_poweron(struct platform_device *pdev)
 		bool connected = gpiod_get_value_cansleep(dcp->hdmi_hpd);
 		dev_info(dcp->dev, "%s: DP2HDMI HPD connected:%d\n", __func__, connected);
 
-		if (connected)
+		/* A yielded hybrid is about to take a Type-C display. */
+		if (connected && !READ_ONCE(dcp->hdmi_yielded))
 			dcp_dptx_connect(dcp, 0);
 	}
 
@@ -4605,7 +4689,7 @@ static void dcp_release_fixed_route(void *data)
 	struct apple_dcp *dcp = data;
 
 	if (dcp->fixed_route_selected) {
-		mux_control_deselect(dcp->xbar);
+		mux_control_deselect(dcp->fixed_xbar);
 		dcp->fixed_route_selected = false;
 	}
 	typec_mux_put(dcp->typec_mux);
@@ -4636,6 +4720,8 @@ VISIBLE_IF_KUNIT void dcp_disable_typec_work(struct apple_dcp *dcp, bool release
 	cancel_delayed_work_sync(&dcp->external_stop_retry_wq);
 	disable_delayed_work_sync(&dcp->hdmi_settle_wq);
 	disable_delayed_work_sync(&dcp->hdmi_recheck_wq);
+	disable_delayed_work_sync(&dcp->link_recovery_wq);
+	disable_delayed_work_sync(&dcp->hybrid_wq);
 	dcp_hdmi_disable(dcp);
 }
 
@@ -4649,6 +4735,8 @@ VISIBLE_IF_KUNIT void dcp_enable_typec_work(struct apple_dcp *dcp)
 	enable_delayed_work(&dcp->announce_wq);
 	enable_delayed_work(&dcp->hdmi_settle_wq);
 	enable_delayed_work(&dcp->hdmi_recheck_wq);
+	enable_delayed_work(&dcp->link_recovery_wq);
+	enable_delayed_work(&dcp->hybrid_wq);
 	dcp_hdmi_enable(dcp);
 	scoped_guard(mutex, &dcp->hpd_mutex)
 		dcp->typec_work_enabled = true;
@@ -4875,8 +4963,6 @@ static int dcp_comp_bind_pipe(struct device *dev, struct device *main, void *dat
 				dev_err(dev, "Missing property 'apple,max-brightness'\n");
 		}
 
-		/* J616 ProMotion capability belongs to the panel, not a boot option. */
-		dcp->panel.has_vrr = of_device_is_compatible(panel_np, "apple,panel-j616");
 		dcp_panel_read_dimensions(dcp, panel_np);
 
 		if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP)
@@ -5055,6 +5141,7 @@ static int dcp_comp_bind(struct device *dev, struct device *main, void *data)
 
 	if (READ_ONCE(dcp->ext_dead))
 		return 0;
+	dcp_peer_bound_26_6(dcp);
 	ret = dcp_comp_bind_pipe(dev, main, data);
 	if (ret && dcp->ext_failsafe) {
 		dcp_ext_give_up(dcp, ret, "bind");
@@ -5099,6 +5186,7 @@ VISIBLE_IF_KUNIT void dcp_comp_unbind(struct device *dev, struct device *main, v
 	}
 
 	disable_work_sync(&dcp->dimensions_wq);
+	dcp_peer_forget(dcp);
 	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6) {
 		iomfb_v26_6_unbind(dcp);
 		return;
@@ -5275,8 +5363,9 @@ static int dcp_fixed_output_error(struct apple_dcp *dcp, int err, const char *wh
 	dev_err(dcp->dev, "HDMI output unusable (%s: %d); USB-C displays are not affected\n",
 		what, err);
 	if (dcp->fixed_route_selected)
-		mux_control_deselect(dcp->xbar);
+		mux_control_deselect(dcp->fixed_xbar);
 	dcp->fixed_route_selected = false;
+	dcp->fixed_xbar = NULL;
 	dcp->xbar = NULL;
 	if (!IS_ERR_OR_NULL(dcp->typec_mux))
 		typec_mux_put(dcp->typec_mux);
@@ -5468,12 +5557,16 @@ static int dcp_platform_probe_pipe(struct platform_device *pdev)
 	dcp->fixed_connector_type = dcp_connector_type_from_dt(dev->of_node);
 	dcp->connector_type = dcp->fixed_connector_type;
 	of_property_read_u32(dev->of_node, "apple,dcp-index", &dcp->index);
+	of_property_read_u32(dev->of_node, "apple,dcp-endpoint", &dcp->peer_endpoint);
+	if (of_property_read_bool(dev->of_node, "apple,typec-hybrid-first"))
+		dcp_typec_hybrid_first_dt();
 	of_property_read_u32(dev->of_node, "apple,dptx-phy", &dcp->dptx_phy);
 	of_property_read_u32(dev->of_node, "apple,dptx-die", &dcp->dptx_die);
 	dcp->fixed_dptx_phy = dcp->dptx_phy;
 	init_completion(&dcp->typec_iomfb_hpd_ready);
 	INIT_DELAYED_WORK(&dcp->typec_reconnect_wq,
 			  dcp_typec_reconnect_work);
+	INIT_DELAYED_WORK(&dcp->link_recovery_wq, dcp_link_recovery_work);
 	INIT_DELAYED_WORK(&dcp->placeholder_edid_wq,
 			  dcp_placeholder_edid_work);
 	INIT_DELAYED_WORK(&dcp->typec_relink_wq, dcp_typec_relink_work);
@@ -5491,6 +5584,7 @@ static int dcp_platform_probe_pipe(struct platform_device *pdev)
 	disable_delayed_work(&dcp->placeholder_edid_wq);
 	disable_delayed_work(&dcp->typec_relink_wq);
 	disable_delayed_work(&dcp->announce_wq);
+	disable_delayed_work(&dcp->link_recovery_wq);
 	dcp->announce.stopped = true;
 	/*
 	 * A native external pipe's bind enables these; firmware callbacks may
@@ -5683,7 +5777,8 @@ static int dcp_platform_probe_pipe(struct platform_device *pdev)
 			ret = devm_add_action_or_reset(dev, dcp_release_fixed_route, dcp);
 			if (ret)
 				return ret;
-			ret = mux_control_select(dcp->xbar, mux_index);
+			dcp->fixed_xbar = dcp->xbar;
+			ret = mux_control_select(dcp->fixed_xbar, mux_index);
 			if (ret)
 				dev_warn(dev, "mux_control_select failed: %d\n", ret);
 			else
@@ -6220,6 +6315,7 @@ static int dcp_platform_resume(struct device *dev)
 	if (READ_ONCE(dcp->ext_dead))
 		return 0;
 
+	dcp->link_recovery_tries = 0;
 	dcp_release_after_sleep(dcp);
 	dcp_enable_typec_work(dcp);
 	/* The HDMI output's PHY and crossbar may have lost their setup in sleep. */

@@ -587,12 +587,16 @@ impl Pair {
         let stamps = host.stamps(qids)?;
         fence(Ordering::Acquire);
         let covered = stamps.map(|stamp| retirement::stamp_covers(stamp, ordinal));
-        self.memory
-            .completion_links(ordinal, kicks, payload, !covered[1])?;
+        self.memory.completion_links(
+            ordinal,
+            kicks,
+            payload,
+            self.variant.fragment_busy && !covered[1],
+        )?;
         let leads = match self.variant.lead_commands {
             true => {
                 let init_manager = !self.memory.manager.initialized();
-                self.memory.write_leads(ordinal, kicks[0], init_manager)?
+                self.memory.write_leads(ordinal, init_manager)?
             }
             false => [false; 2],
         };
@@ -2303,3 +2307,4 @@ mod completion_noted_tests {
         assert!(completion_noted([3, 68], both));
     }
 }
+

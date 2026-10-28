@@ -728,12 +728,15 @@ static unsigned int apple_soc_cpufreq_lazy_request(struct cpufreq_policy *policy
  *
  * Waited-for requests own the cluster from apple_soc_cpufreq_drain() to the
  * next fast-switch request, and the core applies the limit to them.
+ *
+ * Returns the P-state the cluster was moved to, or -1.
  */
-static void apple_soc_cpufreq_lazy_cap(struct apple_cpu_priv *priv,
-				       unsigned int cap, unsigned int freq)
+static int apple_soc_cpufreq_lazy_cap(struct apple_cpu_priv *priv,
+				      unsigned int cap, unsigned int freq)
 {
 	unsigned int requested, pstate;
 	unsigned long flags;
+	int moved = -1;
 
 	raw_spin_lock_irqsave(&priv->lock, flags);
 	priv->cap_pstate = cap;
@@ -741,9 +744,11 @@ static void apple_soc_cpufreq_lazy_cap(struct apple_cpu_priv *priv,
 	requested = priv->pending_pstate >= 0 ? priv->pending_pstate :
 						priv->expected_pstate;
 	pstate = min(priv->asked_pstate, cap);
-	if (!priv->waited && pstate != requested)
-		apple_soc_cpufreq_lazy_set(priv, pstate);
+	if (!priv->waited && pstate != requested &&
+	    !apple_soc_cpufreq_lazy_set(priv, pstate))
+		moved = pstate;
 	raw_spin_unlock_irqrestore(&priv->lock, flags);
+	return moved;
 }
 
 /*
@@ -793,11 +798,26 @@ static int apple_soc_cpufreq_set_target(struct cpufreq_policy *policy,
 	return apple_soc_cpufreq_request(policy, index);
 }
 
+/* Returns the frequency-table frequency of @pstate, or 0. */
+static unsigned int apple_soc_cpufreq_pstate_freq(struct cpufreq_policy *policy,
+						  unsigned int pstate)
+{
+	struct cpufreq_frequency_table *pos;
+
+	cpufreq_for_each_valid_entry(pos, policy->freq_table)
+		if (pos->driver_data == pstate)
+			return pos->frequency;
+	return 0;
+}
+
 /*
- * policy->cur holds the last fast-switch request, which on a lazy_verify SoC
- * may still be pending, or lost to a failure that stopped requests. The core
- * skips a suspend frequency equal to policy->cur, so settle the cluster
- * first: write and verify the pending request, or report the failure.
+ * On a lazy_verify SoC policy->cur is the last fast-switch request, which the
+ * cluster may not hold: it may still be pending, be lost to a failure that
+ * stopped requests, or have been moved since by a fast die-temperature limit,
+ * see apple_soc_cpufreq_lazy_cap(). The core skips a suspend frequency equal
+ * to policy->cur, so settle the cluster first, writing and verifying the
+ * pending request or reporting the failure, and record the state it settled
+ * in as policy->cur before the generic suspend.
  */
 static int apple_soc_cpufreq_suspend(struct cpufreq_policy *policy)
 {
@@ -805,12 +825,17 @@ static int apple_soc_cpufreq_suspend(struct cpufreq_policy *policy)
 
 	if (priv->info->lazy_verify) {
 		int pstate = apple_soc_cpufreq_drain(priv);
+		unsigned int freq;
 		int ret;
 
-		ret = apple_soc_cpufreq_set_pstate(priv, pstate >= 0 ? pstate :
-						   priv->expected_pstate);
+		if (pstate < 0)
+			pstate = priv->expected_pstate;
+		ret = apple_soc_cpufreq_set_pstate(priv, pstate);
 		if (ret)
 			return ret;
+		freq = apple_soc_cpufreq_pstate_freq(policy, pstate);
+		if (freq)
+			policy->cur = freq;
 	}
 
 	return cpufreq_generic_suspend(policy);
@@ -934,6 +959,7 @@ static void apple_fast_die_cap(struct apple_fast_die *fd, unsigned int limit)
 	struct apple_cpu_priv *priv = policy->driver_data;
 	struct cpufreq_frequency_table *pos;
 	unsigned int cap = 0, freq = 0;
+	int moved;
 
 	if (!priv->info->lazy_verify)
 		return;
@@ -945,8 +971,18 @@ static void apple_fast_die_cap(struct apple_fast_die *fd, unsigned int limit)
 		}
 	}
 	/* Limits are frequency-table entries, see apple_fast_die_fit(). */
+	if (!freq)
+		return;
+	/*
+	 * For scaling_cur_freq and the statistics until the next fast-switch
+	 * request, which sets policy->cur itself.
+	 */
+	moved = apple_soc_cpufreq_lazy_cap(priv, cap, freq);
+	if (moved < 0)
+		return;
+	freq = apple_soc_cpufreq_pstate_freq(policy, moved);
 	if (freq)
-		apple_soc_cpufreq_lazy_cap(priv, cap, freq);
+		WRITE_ONCE(policy->cur, freq);
 }
 
 /* Take a sample and queue an update if the limit changes.  Call with @lock held. */

@@ -1093,10 +1093,13 @@
 	 * only hands to its firmware, so the two do not conflict; "rails"
 	 * comes first so that this node's unit address differs from
 	 * pmgr_dcp's.
-	 * Bind after the PMP firmware owner. The PMP (0), CLPC (1) and AP (3)
-	 * then vote through the PMC's T6040 DCS/SOC rail mask. Without the
-	 * supplier dependency, the PMP's iBoot floor could be honoured before
-	 * its firmware replaces it with live demand.
+	 * Static voters are the PMP (0), CLPC (1) and AP (3). The PMP votes
+	 * the DCS and fabric for memory clients other than the CPUs, the GPU
+	 * among them; without its agent, GPU work runs at a low DCS
+	 * state unless a CPU is busy. iBoot leaves the PMP's floor at the top
+	 * DCS state, so its agent must stay off while the PMP does not run:
+	 * apple,pmp holds off the PMC until the PMP driver has bound, and
+	 * unbinds the PMC first.
 	 */
 	pmc: power-management@5048aa000 {
 		compatible = "apple,t6041-pmc";

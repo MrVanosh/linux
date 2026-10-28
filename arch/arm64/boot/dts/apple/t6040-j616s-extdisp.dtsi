@@ -73,6 +73,10 @@
 		iommus = <&dcpext0_dart 23>;
 		/* guessed: the internal DCP uses 0x20000, J700 DISPEXT0 is +0x8000 */
 		apple,bw-scratch = <&pmgr_dcp 0 4 0x28000>;
+		/* firmware Disp_Index, the dual-pipe endpoint ID */
+		apple,dcp-endpoint = <1>;
+		/* the only pipe that can be the primary of a two-pipe display */
+		apple,typec-hybrid-first;
 		status = "disabled";
 
 		dispext0_piodma: piodma {
@@ -125,6 +129,7 @@
 		iommus = <&dcpext1_dart 23>;
 		/* guessed, as dcpext0 */
 		apple,bw-scratch = <&pmgr_dcp 0 4 0x30000>;
+		apple,dcp-endpoint = <2>;
 		status = "disabled";
 
 		dispext1_piodma: piodma {
