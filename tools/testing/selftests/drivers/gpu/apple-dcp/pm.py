@@ -4,7 +4,7 @@
 from pathlib import Path
 import os, re, shlex, shutil, subprocess
 import phy
-from common import block, tipd_pm_header, atc_function
+from common import block, tipd_pm_header, atc_function, ATC_RPM
 
 def ownership(root, usb_unreachable=False):
     ns=phy.parking(root)
@@ -171,6 +171,8 @@ static void usb_mark_last_busy(struct usb_device *u) {
  assert(root_locked&&!pm_phy->lock);
  if(u==&link_device)assert(link_locked);else assert(u==&roots[3]&&!link_locked);
 }
+/* Only an idle-power-off PHY takes a hold of its own; the fixture PHY never does. */
+static void __attribute__((unused)) pm_runtime_get_noresume(struct device *d) { (void)d; assert(!"PHY runtime PM hold"); }
 static void pm_runtime_put_autosuspend(struct device *d) {
  assert(root_locked&&!pm_phy->lock);
  if(d==&link_device.dev){assert(link_locked&&link_pm_refs==1);link_pm_refs--;}
@@ -421,6 +423,8 @@ int main(void)
        ('atcphy_park_retry_delay','atcphy_park_retry','atcphy_park_due','atcphy_mux_change'))
      helpers+=ns['function'](s,'atcphy_mux_update')+'\n'
      # Lane fixtures provide the target mapping and locked body; use the real callback here.
+     # The mux callback powers an idle-power-off PHY first; this PHY is not one.
+     helpers+=''.join(atc_function(s,name) for name in ATC_RPM)
      marker=re.search(r'^static int atcphy_mux_set\(',s,re.M).group()
      helpers+=ns['block'](s,marker)+'\n'
     else:

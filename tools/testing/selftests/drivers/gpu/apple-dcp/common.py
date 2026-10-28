@@ -111,6 +111,23 @@ def atc_function(source, name):
     return block(source, marker.start()) + '\n' if marker else ''
 
 
+# The runtime PM wrappers of a PHY that powers down while idle (T8132 idle_power_off).
+# Fixture PHYs leave idle_rpm false, so the wrappers must not reach runtime PM; older
+# sources have none and atc_function() then yields ''.
+ATC_RPM = ('atcphy_rpm_get', 'atcphy_rpm_busy', 'atcphy_rpm_sync', 'atcphy_rpm_put')
+
+
+def atc_restore_helpers(source):
+    """What atcphy_restore_after_pd_off() needs beyond the parking helpers.
+
+    With T8132 idle runtime PM a USB2-only PHY is brought back as at probe, through
+    atcphy_setup_pipehandler(); older sources only park the PIPE. '' when unused.
+    """
+    if 'atcphy_setup_pipehandler(' not in atc_function(source, 'atcphy_restore_after_pd_off'):
+        return ''
+    return atc_function(source, 'atcphy_setup_pipehandler')
+
+
 def atc_mux_without_pm(source):
     """Lane/teardown fixtures omit USB PM, keeping mode mapping and lane work real.
 
