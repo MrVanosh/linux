@@ -1264,7 +1264,7 @@ static bool dcpep_process_chunks(struct apple_dcp *dcp,
 	}
 
 	/* Validate serialized extent outside the metadata spinlock. */
-	if (dcp->hw.iomfb_method_profile == DCP_IOMFB_METHODS_H17P_EXTERNAL)
+	if (dcp_firmware_metadata_enabled(dcp))
 		dcp->chunks.payload_complete = dcp->chunks.contiguous &&
 			dcp_property_complete(dcp->chunks.data, dcp->chunks.received,
 					      dcp->chunks.length);
@@ -1329,10 +1329,13 @@ static bool dcpep_process_chunks(struct apple_dcp *dcp,
 			return false;
 		}
 
-		if (dcp->hw.iomfb_method_profile == DCP_IOMFB_METHODS_H17P_EXTERNAL) {
+		if (dcp_firmware_metadata_enabled(dcp)) {
 			struct dcp_display_metadata metadata;
 
 			ret = parse_display_metadata(&metadata_ctx, &metadata);
+			if (ret)
+				dev_dbg(dcp->dev, "DisplayAttributes without sink identity: %d\n",
+					ret);
 			dcp_firmware_metadata_attributes(dcp, ret ? NULL : &metadata);
 		} else if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP &&
 			   dcp_has_panel(dcp)) {

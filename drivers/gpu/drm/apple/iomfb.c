@@ -1740,6 +1740,7 @@ int dcp_modes_replace(struct apple_dcp *dcp, struct dcp_parse_ctx *ctx,
 		ret = parse_array_count(ctx, &entries);
 		if (ret)
 			return ret;
+		ctx->metadata_timing = dcp_firmware_metadata_enabled(dcp);
 	}
 	ctx->zero_vrr_range_fallback = dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP;
 	modes = enumerate_modes(ctx, &nr_modes, dcp->width_mm, dcp->height_mm,
