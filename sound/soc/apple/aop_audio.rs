@@ -13,6 +13,11 @@
 //!   high-quality microphones, and the back-end DAIs of the headphone jack
 //!   and the speakers that macaudio links into its card.
 //!
+//! Closing the lid of a MacBook disconnects its internal microphones in
+//! hardware.  Every microphone card has an "Internal Mic" jack that reads
+//! unplugged while a lid is closed (`aop_lid`), so userspace stops offering
+//! them.
+//!
 //! Copyright (C) The Asahi Linux Contributors
 
 use core::fmt;
@@ -750,6 +755,8 @@ impl SndSocAopData {
 
 struct SndSocAopDriver {
     card: *mut bindings::snd_card,
+    /// The card's "Internal Mic" jack, unplugged while a lid is closed.
+    mic: Arc<aop_lid::MicLid>,
     /// The J616s speaker and jack ASoC components (T6040, where the node has a "spkr" DMA channel)
     spkr: Option<aop_spkr::SpeakerComponent>,
 }
@@ -925,6 +932,7 @@ impl SndSocAopDriver {
     fn new(data: Arc<SndSocAopData>) -> Result<Self> {
         let mut this = SndSocAopDriver {
             card: ptr::null_mut(),
+            mic: aop_lid::MicLid::new()?,
             spkr: None,
         };
         let ret = unsafe {
@@ -997,6 +1005,9 @@ impl SndSocAopDriver {
             );
         }
 
+        // The array's jack: unplugged while a lid is closed.
+        this.mic.attach(&data.dev, this.card)?;
+
         let ret = unsafe { bindings::snd_card_register(this.card) };
         if ret < 0 {
             dev_err!(data.dev, "Unable to register sound card");
@@ -1010,6 +1021,8 @@ impl Drop for SndSocAopDriver {
     fn drop(&mut self) {
         // The speaker component (and any card bound to its DAIs) goes before the microphone card.
         self.spkr.take();
+        // The last jack report finishes before the card, and the jack with it, goes away.
+        self.mic.detach();
         if self.card != ptr::null_mut() {
             unsafe {
                 bindings::snd_card_free(self.card);
