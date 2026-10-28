@@ -23,6 +23,7 @@
 
 mod availability;
 mod buffer;
+mod calibration;
 mod channel;
 mod command;
 pub(crate) use command::Attachments;
@@ -49,6 +50,7 @@ mod kick;
 mod object;
 mod port;
 pub(crate) mod power;
+mod reports;
 mod preparation;
 mod qos;
 mod queue;
@@ -647,6 +649,7 @@ impl Drop for Firmware {
             secondary.stop();
         }
         self.primary.stop();
+        self.port.set_effort_full(false);
         self.pool.stop_after_firmware();
         // RTKit destruction releases the mailbox power references. Clear the bridge while
         // those references still keep the register block powered.
@@ -693,6 +696,7 @@ impl Firmware {
 
     /// Called at actual submission publication, not while a queued job is merely being built.
     fn note_submission(&mut self) -> Result {
+        self.port.note_gpu_activity();
         self.effort.submit();
         self.apply_effort(power::FULL_EFFORT)
     }
@@ -1113,6 +1117,8 @@ pub(crate) struct Gpu {
     ids: gpu::SequenceIDs,
     shared: Arc<Shared>,
     _capacity: Pin<KBox<kernel::debugfs::File<capacity::View>>>,
+    _reports: Pin<KBox<kernel::debugfs::File<reports::View>>>,
+    _power: Pin<KBox<kernel::debugfs::File<reports::PowerView>>>,
 }
 
 impl Gpu {
@@ -1123,8 +1129,19 @@ impl Gpu {
         cfg: &'static Config,
         regs: regs::G17Resources,
     ) -> Result<Arc<Gpu>> {
+        let calibration = if cfg.chip_id == crate::hw::t6040::CHIP_ID {
+            Some(calibration::Calibration::read(dev).inspect_err(|_| {
+                dev_err!(dev.as_ref(), "Missing or invalid T6040 GPU calibration handoff\n");
+            })?)
+        } else {
+            None
+        };
         let variant = Self::firmware_variant(dev, &cfg.firmware)?;
         let id = regs.get_g17_id()?;
+        if let Some(calibration) = calibration {
+            calibration.check_cores(&id.core_masks)?;
+            calibration.check_opps(&initdata::InitData::opps(dev, cfg.opps, id.num_clusters)?)?;
+        }
         if id.family != cfg.identity.family
             || id.variant != cfg.identity.variant
             || id.num_dies != cfg.identity.num_dies
@@ -1144,6 +1161,12 @@ impl Gpu {
             oas: cfg.uat_oas,
         };
         let max_frequency_khz = Self::max_frequency_khz(dev)?;
+        let node = dev.as_ref().as_ref().of_node().ok_or(EIO)?;
+        let idle_delay = power::idle_delay(
+            node.get_opt_property(c_str!("apple,idle-off-delay-ms"))?,
+        )?;
+        power::IDLE_HOLD_MS.store(idle_delay, Ordering::Relaxed);
+        dev_info!(dev.as_ref(), "GPU idle power-off delay: {} ms\n", idle_delay);
         let channels = availability::Availability::new()?;
         let progress = availability::Availability::new()?;
         let queues = availability::Availability::new()?;
@@ -1205,6 +1228,14 @@ impl Gpu {
             directory.read_only_file(c"capacity", capacity::View(shared.clone())),
             GFP_KERNEL,
         )?;
+        let reports = KBox::pin_init(
+            directory.read_only_file(c"firmware_reports", reports::View(shared.clone())),
+            GFP_KERNEL,
+        )?;
+        let power = KBox::pin_init(
+            directory.read_only_file(c"power", reports::PowerView(shared.clone())),
+            GFP_KERNEL,
+        )?;
         let gpu = Arc::new(
             Gpu {
                 cfg,
@@ -1214,6 +1245,8 @@ impl Gpu {
                 ids: Default::default(),
                 shared,
                 _capacity: capacity,
+                _reports: reports,
+                _power: power,
             },
             GFP_KERNEL,
         )?;
@@ -1237,24 +1270,26 @@ impl Gpu {
             fw::variant::Firmware::Identified(builds) => builds,
         };
         let version = Self::os_firmware_version(dev);
-        if let Some(build) = builds.iter().find(|build| Some(build.os_version) == version) {
-            dev_info!(dev.as_ref(), "GPU firmware: {}\n", build.name);
-            Self::identify_image(dev, build).map_err(|_| ENODEV)?;
-            return Ok(build.variant);
+        // iBoot strings can be shared by OS releases. Prefer the reported release's
+        // candidate, but admit only an exact loaded image, regardless of that hint.
+        let preferred = builds.iter().filter(|build| Some(build.os_version) == version);
+        let others = builds.iter().filter(|build| Some(build.os_version) != version);
+        for build in Iterator::chain(preferred, others) {
+            if Self::identify_image(dev, build).is_ok() {
+                dev_info!(dev.as_ref(), "GPU firmware: {}\n", build.name);
+                return Ok(build.variant);
+            }
         }
         dev_err!(
             dev.as_ref(),
-            "Unsupported GPU firmware: macOS version {:?} (apple,firmware-version)\n",
+            "Unsupported GPU firmware image (reported macOS version {:?})\n",
             version
         );
-        for build in builds.iter() {
-            dev_err!(dev.as_ref(), "Supported GPU firmware: {}\n", build.name);
-        }
         Err(ENODEV)
     }
 
     /// Checks that the loaded TEXT (the `fw-text` region) is one of `build`'s images, with the DATA size
-    /// of the `fw-data` region. The version property only says which build to expect.
+    /// of the `fw-data` region. The version property is only a selection hint.
     fn identify_image(dev: &AsahiDrmDevice, build: &'static fw::variant::Build) -> Result {
         let node = dev.as_ref().as_ref().of_node().ok_or(EINVAL)?;
         let text = node.reserved_mem_region_to_resource_byname(c_str!("fw-text"))?;
@@ -1351,9 +1386,9 @@ impl Gpu {
                 secondary,
                 primary,
                 bridge,
-                port: port::Port::new()?,
+                port: port::Port::new(power::Demand::new(pdev.as_ref().as_raw())?)?,
                 seen_submissions: 0,
-                rings: channel::Rings::new(),
+                rings: channel::Rings::new()?,
                 recovery: recovery::State::new(),
                 effort: power::Effort::new(),
                 hold: power::Hold::new(),

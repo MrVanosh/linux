@@ -51,6 +51,10 @@
 #include "afk.h"
 #include "av.h"
 #include "dcp.h"
+#include "dcp-panel-adt.h"
+#include <linux/io.h>
+#include <linux/of_address.h>
+#include <linux/sizes.h>
 #include "dcp-fabric-effects.h"
 #include "dcp-fabric.h"
 #include "dcp-hdmi.h"
@@ -552,9 +556,39 @@ void dcp_drm_crtc_page_flip(struct apple_dcp *dcp, ktime_t now)
 	spin_unlock_irqrestore(&crtc->base.dev->event_lock, flags);
 }
 
-static bool dcp_firmware_metadata_enabled(struct apple_dcp *dcp)
+/*
+ * A desktop 26.x external processor has no dcpav-service-epic to read the
+ * sink's EDID through, but exports the TimingElements and DisplayAttributes
+ * of every sink it drives, on HDMI and Type-C alike.
+ */
+static bool dcp_sink_metadata(struct apple_dcp *dcp)
 {
-	return dcp->hw.iomfb_method_profile == DCP_IOMFB_METHODS_H17P_EXTERNAL;
+	return dcp->hw.sink_metadata_edid;
+}
+
+bool dcp_firmware_metadata_enabled(struct apple_dcp *dcp)
+{
+	return dcp->hw.iomfb_method_profile == DCP_IOMFB_METHODS_H17P_EXTERNAL ||
+	       dcp_sink_metadata(dcp);
+}
+
+/*
+ * Such metadata belongs to the sink the firmware reports, as these
+ * processors have no cable generation of their own: each sink change starts
+ * a new connection, which the metadata of an earlier sink can never match.
+ */
+static void dcp_desktop_metadata_new_sink(struct apple_dcp *dcp)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&dcp->metadata.lock, flags);
+	dcp->metadata.attributes_valid = false;
+	dcp->metadata.timing_valid = false;
+	dcp->metadata.epoch = (struct dcp_metadata_epoch) {
+		.generation = dcp->metadata.epoch.generation + 1,
+		.connected = true,
+	};
+	spin_unlock_irqrestore(&dcp->metadata.lock, flags);
 }
 
 void dcp_firmware_metadata_connection(struct apple_dcp *dcp, u64 generation, bool connected)
@@ -563,6 +597,10 @@ void dcp_firmware_metadata_connection(struct apple_dcp *dcp, u64 generation, boo
 
 	if (!dcp_firmware_metadata_enabled(dcp))
 		return;
+	if (dcp_sink_metadata(dcp)) {
+		dcp_desktop_metadata_new_sink(dcp);
+		return;
+	}
 	spin_lock_irqsave(&dcp->metadata.lock, flags);
 	if (generation != dcp->metadata.epoch.generation || !connected) {
 		dcp->rate_proof.connection_sequence++;
@@ -634,6 +672,12 @@ void dcp_firmware_metadata_hotplug(struct apple_dcp *dcp, bool connected)
 	unsigned long flags;
 
 	if (!dcp_firmware_metadata_enabled(dcp))
+		return;
+	/*
+	 * A desktop 26.x link can bounce without the firmware describing its
+	 * sink again: the cable and HDMI HPD paths report a sink change.
+	 */
+	if (dcp_sink_metadata(dcp))
 		return;
 	spin_lock_irqsave(&dcp->metadata.lock, flags);
 	if (connected) {
@@ -725,6 +769,8 @@ void dcp_firmware_metadata_timing(struct apple_dcp *dcp)
 		    !dcp->modes[i].metadata_timing_valid)
 			continue;
 		dcp->metadata.preferred = dcp->modes[i].mode;
+		/* Desktop 26.x publishes its modes without their polarity. */
+		dcp->metadata.preferred.flags |= dcp->modes[i].metadata_sync_flags;
 		dcp->metadata.timing_ticket = dcp->chunks.metadata_ticket;
 		dcp->metadata.timing_valid = true;
 		break;
@@ -774,6 +820,214 @@ const struct drm_edid *dcp_firmware_edid(struct apple_dcp *dcp, u64 *generation)
 		*generation == dcp->metadata.epoch.generation;
 	spin_unlock_irqrestore(&dcp->metadata.lock, flags);
 	if (!valid && !IS_ERR(edid)) {
+		drm_edid_free(edid);
+		return ERR_PTR(-ESTALE);
+	}
+	return edid;
+}
+
+/*
+ * m1n1 reserves the original ADT as a phram node labelled "adt". Read it
+ * without an MTD dependency. Only the desktop panel calls this; other DCP
+ * profiles retain their established identity and brightness paths.
+ */
+void dcp_panel_read_dimensions(struct apple_dcp *dcp, struct device_node *panel_np)
+{
+	of_property_read_u32(panel_np, "width-mm", &dcp->panel.width_mm);
+	/* Read the full height first: adj-height-mm is optional. */
+	of_property_read_u32(panel_np, "height-mm", &dcp->panel.height_mm);
+	if (dcp->notch_height)
+		of_property_read_u32(panel_np, "adj-height-mm", &dcp->panel.height_mm);
+}
+
+static void dcp_panel_adt_identity(struct apple_dcp *dcp)
+{
+	struct dcp_panel_adt panel = {
+		.identity = { .manufacturer = "APP", .product = 0x0616 },
+		.width_mm = dcp->panel.width_mm,
+		.height_mm = dcp->panel.height_mm,
+	};
+	struct device_node *np;
+	const char *label;
+	struct resource res;
+	void *data;
+	int ret = -ENODATA;
+
+	/* Explicit generic label when no serial or product is provided. */
+	strscpy(panel.identity.name, "Apple Panel", sizeof(panel.identity.name));
+	for_each_compatible_node(np, NULL, "phram") {
+		if (of_property_read_string(np, "label", &label) || strcmp(label, "adt"))
+			continue;
+		if (of_address_to_resource(np, 0, &res) ||
+		    !resource_size(&res) || resource_size(&res) > SZ_16M)
+			break;
+		data = memremap(res.start, resource_size(&res), MEMREMAP_WB);
+		if (!data)
+			break;
+		ret = dcp_panel_adt_parse(data, resource_size(&res), &panel);
+		memunmap(data);
+		break;
+	}
+	of_node_put(np);
+	/* The board's OF panel dimensions remain valid if ADT has none. */
+	dcp->panel.width_mm = panel.width_mm;
+	dcp->panel.height_mm = panel.height_mm;
+	dcp->desktop->panel_adt_identity = panel.identity;
+	dev_info(dcp->dev, "panel identity fallback: ADT %s, panel node %s, dimensions %ux%u mm\n",
+		 ret ? "unavailable" : "parsed", panel.found ? "present" : "absent",
+		 panel.width_mm, panel.height_mm);
+}
+
+/* Internal panel identity has no detachable Type-C service or EDID transport. */
+void dcp_panel_metadata_replace(struct apple_dcp *dcp,
+				const struct dcp_display_metadata *metadata)
+{
+	struct dcp_display_metadata merged;
+	unsigned long flags;
+	bool changed = false;
+
+	if (!metadata || dcp->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP ||
+	    !dcp_has_panel(dcp))
+		return;
+	spin_lock_irqsave(&dcp->metadata.lock, flags);
+	merged = *metadata;
+	if (dcp->desktop->panel_metadata_valid &&
+	    merged.product == dcp->desktop->panel_metadata.product &&
+	    !memcmp(merged.manufacturer, dcp->desktop->panel_metadata.manufacturer, 4)) {
+		const struct dcp_display_metadata *old = &dcp->desktop->panel_metadata;
+		bool same_serial = !merged.serial || merged.serial == old->serial;
+
+		/* Zero/empty optional fields mean unspecified, not a new panel. */
+		if (!merged.name[0])
+			memcpy(merged.name, old->name, sizeof(merged.name));
+		if (!merged.serial)
+			merged.serial = old->serial;
+		if (same_serial && !merged.serial_text[0])
+			memcpy(merged.serial_text, old->serial_text, sizeof(merged.serial_text));
+		if (!merged.year)
+			merged.year = old->year;
+		if (!merged.week)
+			merged.week = old->week;
+	}
+	if (!dcp->desktop->panel_metadata_valid ||
+	    memcmp(&dcp->desktop->panel_metadata, &merged, sizeof(merged))) {
+		dcp->desktop->panel_metadata = merged;
+		dcp->desktop->panel_metadata_valid = true;
+		if (!dcp->desktop->panel_raw_edid_size) {
+			dcp->desktop->panel_metadata_generation++;
+			changed = true;
+		}
+	}
+	spin_unlock_irqrestore(&dcp->metadata.lock, flags);
+	if (changed && dcp->connector)
+		dcp_queue_hotplug(dcp->connector);
+}
+
+/* A checksum alone does not guarantee usable userspace identity strings. */
+static bool dcp_panel_edid_has_identity(const u8 *raw)
+{
+	u16 vendor = (u16)raw[8] << 8 | raw[9];
+	bool model = raw[10] || raw[11];
+	bool serial = raw[12] || raw[13] || raw[14] || raw[15];
+
+	if (vendor & 0x8000)
+		return false;
+	for (u32 shift = 0; shift <= 10; shift += 5)
+		if (!((vendor >> shift) & 31) || ((vendor >> shift) & 31) > 26)
+			return false;
+	for (u32 offset = 54; offset <= 108; offset += 18) {
+		const u8 *desc = raw + offset;
+		bool text = false;
+
+		if (desc[0] || desc[1] || desc[2] || desc[4])
+			continue;
+		for (u32 i = 5; i < 18 && desc[i] != '\n'; i++) {
+			if (desc[i] < 0x20 || desc[i] > 0x7e) {
+				text = false;
+				break;
+			}
+			text |= desc[i] != ' ';
+		}
+		if (desc[3] == EDID_DETAIL_MONITOR_NAME)
+			model |= text;
+		if (desc[3] == EDID_DETAIL_MONITOR_SERIAL)
+			serial |= text;
+	}
+	return model && serial;
+}
+
+/* Preserve a validated real EDID ahead of any metadata-derived fallback. */
+void dcp_panel_edid_receive(struct apple_dcp *dcp, const void *blob, size_t len)
+{
+	const struct drm_edid *edid;
+	const u8 *raw;
+	size_t size;
+	unsigned long flags;
+	bool changed;
+
+	if (dcp->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP || !dcp_has_panel(dcp) ||
+	    parse_panel_edid_data(blob, len, &raw, &size))
+		return;
+	edid = drm_edid_alloc(raw, size);
+	if (!edid)
+		return;
+	if (!drm_edid_valid(edid) || !dcp_panel_edid_has_identity(raw)) {
+		drm_edid_free(edid);
+		return;
+	}
+	spin_lock_irqsave(&dcp->metadata.lock, flags);
+	changed = size != dcp->desktop->panel_raw_edid_size ||
+		  memcmp(raw, dcp->desktop->panel_raw_edid, size);
+	if (changed) {
+		memcpy(dcp->desktop->panel_raw_edid, raw, size);
+		dcp->desktop->panel_raw_edid_size = size;
+		dcp->desktop->panel_metadata_generation++;
+	}
+	spin_unlock_irqrestore(&dcp->metadata.lock, flags);
+	drm_edid_free(edid);
+	if (changed && dcp->connector)
+		dcp_queue_hotplug(dcp->connector);
+}
+
+bool dcp_panel_metadata_current(struct apple_dcp *dcp, u64 generation)
+{
+	unsigned long flags;
+	bool valid;
+
+	spin_lock_irqsave(&dcp->metadata.lock, flags);
+	valid = generation == dcp->desktop->panel_metadata_generation;
+	spin_unlock_irqrestore(&dcp->metadata.lock, flags);
+	return valid;
+}
+
+const struct drm_edid *dcp_panel_edid_snapshot(struct apple_dcp *dcp,
+					       const struct dcp_display_mode *modes,
+					       unsigned int count, u64 *generation)
+{
+	struct dcp_display_metadata metadata;
+	const struct drm_edid *edid;
+	u8 *raw;
+	size_t size;
+	unsigned long flags;
+
+	raw = kmalloc_objs(u8, sizeof(dcp->desktop->panel_raw_edid), GFP_KERNEL);
+	if (!raw)
+		return ERR_PTR(-ENOMEM);
+	spin_lock_irqsave(&dcp->metadata.lock, flags);
+	size = dcp->desktop->panel_raw_edid_size;
+	memcpy(raw, dcp->desktop->panel_raw_edid, size);
+	metadata = dcp->desktop->panel_metadata_valid ?
+		dcp->desktop->panel_metadata : dcp->desktop->panel_adt_identity;
+	*generation = dcp->desktop->panel_metadata_generation;
+	spin_unlock_irqrestore(&dcp->metadata.lock, flags);
+	/* The caller supplies the same retained catalog it is publishing. */
+	edid = size ? drm_edid_alloc(raw, size) :
+		dcp_panel_edid(&metadata, modes, count,
+			       dcp->panel.width_mm, dcp->panel.height_mm);
+	kfree(raw);
+	if (!edid)
+		return ERR_PTR(-ENOMEM);
+	if (!IS_ERR(edid) && !dcp_panel_metadata_current(dcp, *generation)) {
 		drm_edid_free(edid);
 		return ERR_PTR(-ESTALE);
 	}
@@ -895,6 +1149,13 @@ static struct apple_dcp_afkep *dcp_afkep(struct apple_dcp *dcp, u8 endpoint)
 	}
 }
 
+/* RX and the watchdog may race to finish one present, never both. */
+bool dcp_desktop_present_complete(struct apple_dcp *dcp, u32 id)
+{
+	return id == READ_ONCE(dcp->desktop->present_id) &&
+		xchg(&dcp->desktop->present_pending, false);
+}
+
 #define DCP_SWAP_WATCHDOG_MS		1000
 #define DCP_SWAP_WATCHDOG_RETRAINS	5
 
@@ -913,9 +1174,25 @@ VISIBLE_IF_KUNIT void dcp_swap_watchdog(struct work_struct *work)
 		container_of(to_delayed_work(work), struct apple_dcp,
 			     swap_watchdog_wq);
 
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP) {
+		if (time_before(jiffies, dcp->swap_watchdog_deadline) ||
+		    !xchg(&dcp->desktop->present_pending, false))
+			return;
+		/* Retain displaced buffers until a later present really completes. */
+		dcp_unarm_retained_framebuffers(dcp, READ_ONCE(dcp->desktop->present_id));
+		dcp_backlight_desktop_finish(dcp, READ_ONCE(dcp->desktop->present_id),
+					     true, false);
+	}
+
 	if (!iomfb_retire_dropped_present_h17p(dcp))
 		return;
 
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP &&
+	    READ_ONCE(dcp->vrr_enabled)) {
+		WRITE_ONCE(dcp->desktop->vrr_failed, true);
+		WRITE_ONCE(dcp->vrr_enabled, false);
+		dev_warn(dcp->dev, "adaptive swap timed out, restoring fixed refresh\n");
+	}
 	dev_warn(dcp->dev, "swap not completed, retraining the display\n");
 	dcp_mode_invalidate(&dcp->mode_state);
 	dcp_drm_crtc_vblank(dcp->crtc);
@@ -926,7 +1203,9 @@ VISIBLE_IF_KUNIT void dcp_swap_watchdog(struct work_struct *work)
 
 void dcp_swap_watchdog_arm(struct apple_dcp *dcp)
 {
-	if (dcp_is_typec_output(dcp)) {
+	if (dcp_is_typec_output(dcp) ||
+	    (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP &&
+	     READ_ONCE(dcp->vrr_enabled))) {
 		dcp->swap_watchdog_deadline = jiffies +
 			msecs_to_jiffies(DCP_SWAP_WATCHDOG_MS);
 		mod_delayed_work(system_dfl_wq, &dcp->swap_watchdog_wq,
@@ -2653,6 +2932,9 @@ static void disconnected_hpd_event(struct apple_connector *con)
 		struct apple_dcp *dcp = platform_get_drvdata(pdev);
 
 		WRITE_ONCE(dcp->ext_backlight, false);
+		/* Nothing else reports an HDMI unplug to the firmware metadata. */
+		if (dcp_sink_metadata(dcp))
+			dcp_desktop_metadata_new_sink(dcp);
 	}
 
 	/* May run with DRM modeset locks held; defer property/cache cleanup. */
@@ -4709,8 +4991,6 @@ static int dcp_comp_bind_pipe(struct device *dev, struct device *main, void *dat
 		panel_np = of_get_compatible_child(dev->of_node, "apple,panel");
 
 	if (panel_np) {
-		const char height_prop[2][16] = { "adj-height-mm", "height-mm" };
-
 		if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP) {
 			/*
 			 * Desktop 26.x swaps carry nits, and the panel node
@@ -4728,11 +5008,10 @@ static int dcp_comp_bind_pipe(struct device *dev, struct device *main, void *dat
 				dev_err(dev, "Missing property 'apple,max-brightness'\n");
 		}
 
-		of_property_read_u32(panel_np, "width-mm", &dcp->panel.width_mm);
-		/* use adjusted height as long as the notch is hidden */
-		of_property_read_u32(panel_np, height_prop[!dcp->notch_height],
-				     &dcp->panel.height_mm);
+		dcp_panel_read_dimensions(dcp, panel_np);
 
+		if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP)
+			dcp_panel_adt_identity(dcp);
 		of_node_put(panel_np);
 		dcp->fixed_connector_type = DRM_MODE_CONNECTOR_eDP;
 		dcp->connector_type = DRM_MODE_CONNECTOR_eDP;
@@ -5302,6 +5581,9 @@ static int dcp_platform_probe_pipe(struct platform_device *pdev)
 	mutex_init(&dcp->dcpavserv.lock);
 	INIT_WORK(&dcp->dcpavserv.close_wq, dcpavserv_close_work);
 	dcp->hw = *(struct apple_dcp_hw_data *)of_device_get_match_data(dev);
+	/* The display such a processor finds at boot is its first sink. */
+	if (dcp_sink_metadata(dcp))
+		dcp_desktop_metadata_new_sink(dcp);
 	if (dcp->hw.iomfb_method_profile ==
 	    DCP_IOMFB_METHODS_H17P_EXTERNAL) {
 		if (!dcp->hw.firmware_clock ||
@@ -6201,6 +6483,7 @@ static const struct apple_dcp_hw_data apple_dcp_hw_t6041 = {
 
 static const struct apple_dcp_hw_data apple_dcp_hw_t6041_dcpext = {
 	.num_dptx_ports = 2,
+	.sink_metadata_edid = true,
 };
 
 static const struct of_device_id of_match[] = {

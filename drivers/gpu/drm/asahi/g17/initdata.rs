@@ -1328,7 +1328,11 @@ impl InitData {
 
     /// The GPU's operating points: `count` of them, each with one voltage cell for the whole
     /// GPU or one per cluster.
-    fn opps(dev: &AsahiDrmDevice, count: usize, clusters: u32) -> Result<KVec<abi::Opp>> {
+    pub(super) fn opps(
+        dev: &AsahiDrmDevice,
+        count: usize,
+        clusters: u32,
+    ) -> Result<KVec<abi::Opp>> {
         let opps = Self::opp_table(dev, c_str!("operating-points-v2"))?;
         if opps.len() != count {
             return Err(EINVAL);
@@ -1559,7 +1563,10 @@ impl super::recovery::Memory for InitData {
             .dword(self.status_b + abi::PrimaryStatusB::RECOVERY_SLOT_MASK)?
             .load(Ordering::Relaxed);
         let mut sources = super::recovery::Sources::sample(mask as u32, |slot| {
-            let key = super::recovery::slot_key(slot, self.recovery_slot_keys)?;
+            // Progress is independently available even when this firmware's key
+            // address is unknown. Zero keeps ownership unknown and cannot override
+            // firmware blame, but preserves the progress evidence for diagnostics.
+            let key = super::recovery::slot_key(slot, self.recovery_slot_keys).unwrap_or(0);
             let monitor = self.recovery_view_words::<6>(abi::recovery::PROGRESS_VIEW,
                 abi::recovery::PROGRESS_START + slot * abi::recovery::PROGRESS_STRIDE)
                 .ok().map(|words| words[0])?;

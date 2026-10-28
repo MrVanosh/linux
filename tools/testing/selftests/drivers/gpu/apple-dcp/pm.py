@@ -513,6 +513,8 @@ static void *fwnode_typec_mux_get(struct fwnode_handle *f) { (void)f;muxes++;ret
 static struct fwnode_handle *fwnode_find_reference(struct fwnode_handle *f,const char *s,int n) {
  (void)f;(void)s;(void)n;connector.refs++;return &connector;
 }
+static bool fwnode_property_present(struct fwnode_handle *f,const char *s) { (void)f;(void)s;return true; }
+static struct fwnode_handle *fwnode_handle_get(struct fwnode_handle *f) { assert(!"connector is a displayport reference");return f; }
 static void __attribute__((unused)) fwnode_handle_put(struct fwnode_handle *f) {
  if(f){assert(f->refs>0);f->refs--;}
 }
@@ -551,7 +553,7 @@ static void balanced(void) {
 int main(void) {
  (void)cd321x_pm_notifications;
  struct cd321x c;
- struct cd321x_pm_state budget;
+ struct cd321x_pm_state budget={0};
  cd321x_pm_init(&budget);assert(cd321x_pm_ready(&budget));
  assert(cd321x_display_taken(-ENOSPC,true)&&!cd321x_display_taken(-EBUSY,true)&&!cd321x_display_taken(0,true)&&cd321x_display_taken(-EBUSY,false)&&!cd321x_display_taken(-ENOSPC,false)&&!cd321x_display_taken(0,false));
  for(unsigned int i=0;i<CD321X_RESUME_ATTEMPTS;i++){

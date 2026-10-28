@@ -47,7 +47,7 @@ impl event::Transport for Service<'_> {
         role: Role,
         mut consume: impl FnMut(&mut Self, Event) -> Result<bool>,
     ) -> Result {
-        let mut events = channel::Events::new(role);
+        let mut events = channel::Events::new(role, self.firmware.primary.state.shared.variant.graph);
         while let Some(event) =
             events.next(&self.firmware.primary.state.shared.dev, &self.firmware.init)?
         {
@@ -230,6 +230,9 @@ impl recovery::Queues for Service<'_> {
             .map_or(recovery::Interrupted::None, |queue| {
                 queue.note_interrupted(stamp)
             })
+    }
+    fn report_blamed_render(&self, qid: u8) {
+        self.firmware.queues.report_render_recovery(qid, &self.firmware.port);
     }
     fn settle_blamed_render(&mut self, qid: u8, error: Error) {
         let result = self

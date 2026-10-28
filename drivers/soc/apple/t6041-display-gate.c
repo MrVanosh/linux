@@ -379,6 +379,40 @@ static int gate_stage_apply(const struct gate_stage *st, struct device_node *dis
 
 #define GATE_PMP_WAIT_MS 20000
 
+/* A tether boot reserves ATC0 for the debug link. Its DP PHY is disabled,
+ * so exposing a route@0 would make its DCP (dcpext1, or the dcpext0 hybrid)
+ * defer on that missing supplier and take the usable ATC1/2 display routes
+ * (and dcpext0's HDMI) down with it.
+ */
+static bool gate_route_phy_available(struct device_node *route)
+{
+	struct device_node *routes, *dcp;
+	struct of_phandle_args phy;
+	char name[16];
+	u32 index;
+	int match;
+	bool available = false;
+
+	if (of_property_read_u32(route, "reg", &index))
+		return false;
+	routes = of_get_parent(route);
+	dcp = routes ? of_get_parent(routes) : NULL;
+	of_node_put(routes);
+	if (!dcp)
+		return false;
+	/* The fabric takes a route's PHY by name ("typecN"), not by position. */
+	snprintf(name, sizeof(name), "typec%u", index);
+	match = of_property_match_string(dcp, "phy-names", name);
+	if (match >= 0)
+		index = match;
+	if (!of_parse_phandle_with_args(dcp, "phys", "#phy-cells", index, &phy)) {
+		available = of_device_is_available(phy.np);
+		of_node_put(phy.np);
+	}
+	of_node_put(dcp);
+	return available;
+}
+
 /* Set the status of the processors (externals) or the routes, and the display subsystem, in one changeset. */
 static int gate_set(struct device_node *display, bool dcps, const char *dcp_status, bool routes,
 		    const char *route_status, const char *display_status)
@@ -399,6 +433,12 @@ static int gate_set(struct device_node *display, bool dcps, const char *dcp_stat
 			if (!(dcps && gate_is_dcp(path)) && !(routes && gate_is_route(path)))
 				continue;
 			np = of_find_node_by_path(path);
+			if (np && gate_is_route(path) && route_status &&
+			    !strcmp(route_status, "okay") && !gate_route_phy_available(np)) {
+				pr_info("%s remains disabled: DP PHY unavailable\n", path);
+				of_node_put(np);
+				continue;
+			}
 			ret = np ? of_changeset_update_prop_string(cs, np, "status",
 								   gate_is_dcp(path) ? dcp_status :
 								   route_status) : -ENODEV;

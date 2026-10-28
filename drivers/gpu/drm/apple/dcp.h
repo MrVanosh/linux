@@ -101,6 +101,7 @@ bool dcp_crtc_mode_fixup(struct drm_crtc *crtc,
 			 const struct drm_display_mode *mode,
 			 struct drm_display_mode *adjusted_mode);
 void dcp_set_dimensions(struct apple_dcp *dcp, u64 generation);
+void dcp_panel_read_dimensions(struct apple_dcp *dcp, struct device_node *panel_np);
 void dcp_update_connector_dimensions(struct apple_dcp *dcp,
 				     struct drm_connector *connector);
 void dcp_send_message(struct apple_dcp *dcp, u8 endpoint, u64 message);

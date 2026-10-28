@@ -30,6 +30,7 @@
 #include <drm/drm_gem_dma_helper.h>
 #include <drm/drm_modeset_lock.h>
 #include <drm/drm_probe_helper.h>
+#include <drm/drm_print.h>
 #include <drm/drm_vblank.h>
 
 #include "dcp.h"
@@ -39,6 +40,117 @@
 #include "iomfb_m4.h"
 #include "parser.h"
 #include "trace.h"
+
+struct dcp_identity_trace {
+	struct apple_dcp *dcp;
+	atomic_t *count;
+};
+
+static void dcp_identity_key_log(void *data, const char *key, u32 key_len,
+				 u32 type, u32 size, u32 depth)
+{
+	struct dcp_identity_trace *trace = data;
+	struct apple_dcp *dcp = trace->dcp;
+	char safe[65];
+	u32 i;
+
+	if (!atomic_add_unless(trace->count, 1, 128))
+		return;
+	for (i = 0; i < min_t(u32, key_len, sizeof(safe) - 1); i++)
+		safe[i] = key[i] >= 0x20 && key[i] <= 0x7e ? key[i] : '?';
+	safe[i] = 0;
+	dev_info(dcp->dev, "panel identity depth=%u key=%s type=%u size=%u\n",
+		 depth, safe, type, size);
+}
+
+void dcp_trace_panel_property(struct apple_dcp *dcp, int tag, const char *key,
+			      size_t key_len, const void *blob, size_t len)
+{
+	struct dcp_identity_trace trace;
+	u32 slot = tag == 552 ? 0 : tag == 561 ? 1 : tag == 114 ? 2 : 3;
+	int ret;
+
+	if (!drm_debug_enabled(DRM_UT_KMS) ||
+	    dcp->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP || !dcp_has_panel(dcp))
+		return;
+	trace.dcp = dcp;
+	trace.count = &dcp->desktop->identity_log_count[slot];
+	/* Periodic statistics cannot consume the panel setters' budget. */
+	if (!atomic_add_unless(trace.count, 1, 128))
+		return;
+	dev_info(dcp->dev, "panel identity callback=D%03d bytes=%zu null=%d\n",
+		 tag, len, !blob);
+	dcp_identity_key_log(&trace, key, key_len, 0, len, 0);
+	if (!blob)
+		return;
+	ret = parse_identity_keys(blob, len, dcp_identity_key_log, &trace);
+	if (ret)
+		dev_info(dcp->dev, "panel identity inspection stopped: %d\n", ret);
+}
+
+/* Other property setters use fixed scalar records, not serialization. */
+static void dcp_trace_panel_setter(struct apple_dcp *dcp, int tag,
+				   const void *data, size_t len)
+{
+	struct dcp_identity_trace trace = { .dcp = dcp };
+	const char *in = data;
+	u32 offset = 0, type, size, expected;
+	bool is_null = false;
+
+	if (!drm_debug_enabled(DRM_UT_KMS) ||
+	    dcp->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP || !dcp_has_panel(dcp))
+		return;
+	switch (tag) {
+	case 414:
+		offset = 4;
+		fallthrough;
+	case 563:
+		type = 4;
+		size = 8;
+		expected = offset + 76;
+		break;
+	case 415:
+		offset = 4;
+		fallthrough;
+	case 565:
+		type = 11;
+		size = 4;
+		expected = offset + 72;
+		break;
+	case 567:
+		type = 9;
+		size = 64;
+		expected = 128;
+		break;
+	case 102:
+		type = 4;
+		size = 4;
+		expected = 68;
+		break;
+	case 104:
+		type = 11;
+		size = 1;
+		expected = 68;
+		break;
+	default:
+		return;
+	}
+	/* Inspect only the public wire shape, without changing its handler. */
+	if (len != expected)
+		return;
+	if (tag == 414 || tag == 415 || tag == 563 || tag == 565)
+		is_null = in[offset + 64 + size] & 1;
+	if (tag == 567)
+		size = strnlen(in + 64, 64);
+	/* Scalar/service setters share the bounded miscellaneous-property budget. */
+	trace.count = &dcp->desktop->identity_log_count[3];
+	if (!atomic_add_unless(trace.count, 1, 128))
+		return;
+	dev_info(dcp->dev, "panel identity callback=D%03d bytes=%zu null=%d\n",
+		 tag, len, is_null);
+	dcp_identity_key_log(&trace, in + offset, strnlen(in + offset, 64),
+			     type, is_null ? 0 : size, 0);
+}
 
 static int dcp_tx_offset(enum dcp_context_id id)
 {
@@ -1267,7 +1379,8 @@ static void dcpep_handle_cb(struct apple_dcp *dcp, enum dcp_context_id context,
 	u8 depth;
 	bool handled, zero_reply;
 
-	if (dcp->fw_compat == DCP_FIRMWARE_H17P &&
+	if ((dcp->fw_compat == DCP_FIRMWARE_H17P ||
+	     dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP) &&
 	    (length < sizeof(*hdr) || !ch || ch->depth >= DCP_MAX_CALL_DEPTH ||
 	     offset >= 0x8000 || length > 0x8000 - offset)) {
 		dev_err(dev, "invalid IOMFB callback envelope\n");
@@ -1285,6 +1398,14 @@ static void dcpep_handle_cb(struct apple_dcp *dcp, enum dcp_context_id context,
 
 	tag = dcp_parse_tag(hdr->tag);
 
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP &&
+	    (!iomfb_check_callback_v26_6_desktop(tag, hdr->in_len, hdr->out_len) ||
+	     (u64)sizeof(*hdr) + hdr->in_len + hdr->out_len != length)) {
+		dev_err(dev, "invalid desktop IOMFB callback %d (%u, %u)\n",
+			tag, hdr->in_len, hdr->out_len);
+		dcp->crashed = true;
+		return;
+	}
 
 	handled = tag >= 0 && tag < IOMFB_MAX_CB && dcp->cb_handlers &&
 		  dcp->cb_handlers[tag];
@@ -1311,6 +1432,8 @@ static void dcpep_handle_cb(struct apple_dcp *dcp, enum dcp_context_id context,
 	in = data + sizeof(*hdr);
 	out = in + hdr->in_len;
 
+	dcp_trace_panel_setter(dcp, tag, in, hdr->in_len);
+
 	if (!handled) {
 		zero_reply = dcp_external_zero_reply(dcp, tag, context,
 						     hdr->in_len, hdr->out_len);
@@ -1328,11 +1451,15 @@ static void dcpep_handle_cb(struct apple_dcp *dcp, enum dcp_context_id context,
 			return;
 		}
 		/*
-		 * Leaving a callback unanswered wedges the coprocessor: it
-		 * waits for the ack forever and the outer call never returns.
-		 * On H17P answer it with a zeroed output instead.
+		 * Drain an unsupported desktop callback too. The outer modeset
+		 * must see an error even if firmware accepts the zero reply;
+		 * never pop its command before its real ACK arrives.
 		 */
-		if (dcp->fw_compat == DCP_FIRMWARE_H17P) {
+		if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP &&
+		    READ_ONCE(dcp->desktop->modeset_active))
+			WRITE_ONCE(dcp->desktop->modeset_callback_error, true);
+		if (dcp->fw_compat == DCP_FIRMWARE_H17P ||
+		    dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP) {
 			if (hdr->out_len)
 				memset(out, 0, hdr->out_len);
 			depth = dcp_push_depth(&ch->depth);
@@ -1613,7 +1740,9 @@ int dcp_modes_replace(struct apple_dcp *dcp, struct dcp_parse_ctx *ctx,
 		ret = parse_array_count(ctx, &entries);
 		if (ret)
 			return ret;
+		ctx->metadata_timing = dcp_firmware_metadata_enabled(dcp);
 	}
+	ctx->zero_vrr_range_fallback = dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP;
 	modes = enumerate_modes(ctx, &nr_modes, dcp->width_mm, dcp->height_mm,
 				dcp->notch_height,
 				dcp->fixed_connector_type == DRM_MODE_CONNECTOR_eDP,
@@ -1914,8 +2043,11 @@ int dcp_get_modes(struct drm_connector *connector)
 		}
 	} else {
 		u64 generation = 0;
+		bool panel = dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP &&
+			     dcp_has_panel(dcp);
 		const struct drm_edid *derived = nr_modes ?
-			dcp_firmware_edid(dcp, &generation) : ERR_PTR(-ENODATA);
+			(panel ? dcp_panel_edid_snapshot(dcp, modes, nr_modes, &generation) :
+			 dcp_firmware_edid(dcp, &generation)) : ERR_PTR(-ENODATA);
 
 		if (!IS_ERR(derived)) {
 			bool log = !apple_connector->drm_edid_firmware_derived ||
@@ -1926,16 +2058,21 @@ int dcp_get_modes(struct drm_connector *connector)
 			apple_connector->drm_edid_generation = generation;
 			update = drm_edid_connector_update(connector, derived);
 			drm_edid_free(derived);
-			if (update || !dcp_firmware_metadata_current(dcp, generation)) {
+			if (update || !(panel ? dcp_panel_metadata_current(dcp, generation) :
+				       dcp_firmware_metadata_current(dcp, generation))) {
 				drm_edid_connector_update(connector, NULL);
 				apple_connector->drm_edid_firmware_derived = false;
 			} else if (log) {
 				dev_info(dcp->dev, "using firmware-derived EDID metadata for connection %llu\n",
 					 generation);
 			}
-		} else if (apple_connector->drm_edid_firmware_derived) {
-			drm_edid_connector_update(connector, NULL);
-			apple_connector->drm_edid_firmware_derived = false;
+		} else {
+			if (panel && nr_modes)
+				dev_dbg(dcp->dev, "panel EDID generation failed: %pe\n", derived);
+			if (apple_connector->drm_edid_firmware_derived) {
+				drm_edid_connector_update(connector, NULL);
+				apple_connector->drm_edid_firmware_derived = false;
+			}
 		}
 	}
 
@@ -1955,7 +2092,7 @@ edid_done:
 		published_180hz |= modes[i].automatic_rgb8_quirk;
 		published++;
 		if (modes[i].vrr) {
-			u16 lo = modes[i].min_vrr >> 16;
+			u16 lo = DIV_ROUND_UP(modes[i].min_vrr, 1U << 16);
 			u16 hi = modes[i].max_vrr >> 16;
 
 			if (!min_vfreq || lo < min_vfreq)
@@ -1987,6 +2124,10 @@ modes_done:
 		connector->display_info.monitor_range.max_vfreq = max_vfreq;
 	}
 
+	/* EDID base dimensions are rounded to cm; the panel's OF/ADT size is exact. */
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP && dcp_has_panel(dcp))
+		dcp_update_connector_dimensions(dcp, connector);
+
 	return published;
 }
 
@@ -2003,7 +2144,8 @@ static int dcp_desktop_modeset(struct apple_dcp *dcp,
 
 	if (d->trial_modeset_ok) {
 		d->trial_modeset_ok = false;
-		if (d->mode_live && lookup_mode(dcp, &crtc_state->mode, &matched) &&
+		if (!crtc_state->vrr_enabled && d->mode_live &&
+		    lookup_mode(dcp, &crtc_state->mode, &matched) &&
 		    matched.timing_mode_id == d->trial_timing_mode_id &&
 		    matched.color_mode_id == d->trial_color_mode_id) {
 			dev_dbg(dcp->dev, "keeping the takeover mode " DRM_MODE_FMT "\n",
