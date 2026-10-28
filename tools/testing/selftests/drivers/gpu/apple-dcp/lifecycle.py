@@ -3,7 +3,7 @@
 """Actual disconnect authority, DWC3 teardown and firmware resource admission."""
 from pathlib import Path
 import re
-from common import block, apple_function, internal_inline, atc_mux_without_pm, source_defines, ATC_POST_TUNABLE, tipd_pm_header, firmware_lineage
+from common import block, apple_function, internal_inline, atc_mux_without_pm, source_defines, ATC_POST_TUNABLE, tipd_pm_header, firmware_lineage, atc_restore_helpers
 
 def disconnect(root):
     # Copyright 2026 Ryan Murray
@@ -1039,6 +1039,10 @@ def teardown(root):
                      'dwc3_core_exit_after_phy_power_off', 'dwc3_core_exit',
                      'dwc3_core_remove_common', 'dwc3_core_remove', 'dwc3_core_remove_no_shutdown')
     names['atc'] += ('atcphy_dwc3_reset_deassert',)
+    if atc_restore_helpers(files['atc']):
+        # A USB2-only PHY is brought back as at probe after its domain was off.
+        at = names['atc'].index('atcphy_restore_after_pd_off')
+        names['atc'] = names['atc'][:at] + ('atcphy_setup_pipehandler',) + names['atc'][at:]
     names['atc'] = tuple(name for name in names['atc'] if name not in ('atcphy_get_mode_config', 'j700_field_update'))
     names = {n: tuple(name for name in group if re.search(r'^(?:static [^\n]*\b|(?:int|void) )' + name + r'\(', files[n], re.M))
              for n, group in names.items()}
