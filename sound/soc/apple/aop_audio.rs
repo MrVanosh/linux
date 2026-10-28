@@ -3,6 +3,16 @@
 
 //! Apple AOP audio driver
 //!
+//! One driver for the audio services of the AOP co-processor on every Apple
+//! silicon Mac.  The compatible selects what the firmware offers:
+//!
+//! * the PDM microphones behind an `audio` node (T8103 to T6041): one card,
+//!   with the high-power microphone array read over ADMAC, and on T6041 the
+//!   speaker and headphone jack streams (`aop_spkr`);
+//! * the T8140 services (`aop_t8140`): a card with the low-power and the
+//!   high-quality microphones, and the back-end DAIs of the headphone jack
+//!   and the speakers that macaudio links into its card.
+//!
 //! Copyright (C) The Asahi Linux Contributors
 
 use core::fmt;
@@ -42,7 +52,9 @@ use kernel::{
 
 use pin_init::Zeroable;
 
+mod aop_lid;
 mod aop_spkr;
+mod aop_t8140;
 
 /// An unaligned u32 type.
 ///
@@ -1027,25 +1039,49 @@ const HW_CFG_T6040: SndSocAopHwConfig = SndSocAopHwConfig {
     t6040_flow: true,
 };
 
+/// What a compatible selects.
+enum AopVariant {
+    /// The PDM microphones behind the `audio` node, with this setup.
+    Pdm(SndSocAopHwConfig),
+    /// The T8140 AOP audio services.
+    T8140,
+}
+
+static VARIANT_T8013: AopVariant = AopVariant::Pdm(HW_CFG_T8013);
+static VARIANT_T6030: AopVariant = AopVariant::Pdm(HW_CFG_T6030);
+static VARIANT_T6040: AopVariant = AopVariant::Pdm(HW_CFG_T6040);
+static VARIANT_T8140: AopVariant = AopVariant::T8140;
+
 kernel::of_device_table!(
     OF_TABLE,
-    <SndSocAopDriver as platform::Driver>::IdInfo,
+    <AopAudio as platform::Driver>::IdInfo,
     [
-        (of::DeviceId::new(c_str!("apple,aop-audio")), &HW_CFG_T8013),
+        (of::DeviceId::new(c_str!("apple,aop-audio")), &VARIANT_T8013),
         (
             of::DeviceId::new(c_str!("apple,t6030-aop-audio")),
-            &HW_CFG_T6030
+            &VARIANT_T6030
         ),
         (
             of::DeviceId::new(c_str!("apple,t6041-aop-audio")),
-            &HW_CFG_T6040
+            &VARIANT_T6040
+        ),
+        (
+            of::DeviceId::new(c_str!("apple,t8140-aop-audio")),
+            &VARIANT_T8140
         ),
     ]
 );
 
-impl platform::Driver for SndSocAopDriver {
-    type IdInfo = &'static SndSocAopHwConfig;
-    type Data<'bound> = SndSocAopDriver;
+/// The bound driver, as the variant set it up.
+enum AopAudio {
+    /// Held for its `Drop`, which frees the card.
+    Pdm { _driver: SndSocAopDriver },
+    T8140(aop_t8140::SndSocT8140AopDriver),
+}
+
+impl platform::Driver for AopAudio {
+    type IdInfo = &'static AopVariant;
+    type Data<'bound> = AopAudio;
 
     const OF_ID_TABLE: Option<of::IdTable<Self::IdInfo>> = Some(&OF_TABLE);
 
@@ -1053,7 +1089,27 @@ impl platform::Driver for SndSocAopDriver {
         pdev: &'bound platform::Device<Core<'_>>,
         info: Option<&'bound Self::IdInfo>,
     ) -> impl PinInit<Self::Data<'bound>, Error> + 'bound {
-        let info = info.ok_or(ENODEV)?;
+        let variant: &'static AopVariant = *info.ok_or(ENODEV)?;
+        Ok(match variant {
+            AopVariant::Pdm(hw) => AopAudio::Pdm {
+                _driver: SndSocAopDriver::probe(pdev, hw)?,
+            },
+            AopVariant::T8140 => AopAudio::T8140(aop_t8140::SndSocT8140AopDriver::probe(pdev)?),
+        })
+    }
+
+    fn unbind(_dev: &platform::Device<Core<'_>>, this: Pin<&Self>) {
+        if let AopAudio::T8140(driver) = &*this {
+            driver.unbind();
+        }
+    }
+}
+
+impl SndSocAopDriver {
+    fn probe(
+        pdev: &platform::Device<Core<'_>>,
+        info: &'static SndSocAopHwConfig,
+    ) -> Result<Self> {
         let dev = ARef::<device::Device>::from(pdev.as_ref());
         let parent = pdev.as_ref().parent().ok_or(ENODEV)?;
         // SAFETY: this is a service device the AOP core registered, being
@@ -1119,9 +1175,9 @@ impl platform::Driver for SndSocAopDriver {
 }
 
 module_platform_driver! {
-    type: SndSocAopDriver,
+    type: AopAudio,
     name: "snd_soc_apple_aop",
-    description: "AOP microphone capture driver",
+    description: "Apple AOP audio: microphones, and on T8140 the headphone jack and speakers",
     license: "Dual MIT/GPL",
     alias: ["platform:snd_soc_apple_aop"],
     params: {

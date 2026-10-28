@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
-#![recursion_limit = "2048"]
 
 //! Apple T8140 (J700, MacBook Neo) AOP audio
 //!
@@ -57,10 +56,8 @@ use kernel::{
         DmaMask, //
     },
     error::from_err_ptr,
-    module_platform_driver,
     new_mutex,
     new_spinlock,
-    of,
     platform,
     prelude::*,
     soc::apple::aop::{
@@ -95,8 +92,7 @@ use kernel::{
     }, //
 };
 
-mod aop_lid;
-use aop_lid::MicLid;
+use crate::aop_lid::MicLid;
 
 const EPIC_SUBTYPE_WRAPPED_CALL: u16 = 0x20;
 const EPIC_SUBTYPE_PRODUCER_REPORT: u16 = 0x20;
@@ -2551,7 +2547,7 @@ impl AsocContext {
     }
 }
 
-struct SndSocT8140AopDriver {
+pub(crate) struct SndSocT8140AopDriver {
     card: *mut bindings::snd_card,
     data: Arc<SndSocT8140AopData>,
     asoc: KBox<AsocContext>,
@@ -2816,22 +2812,9 @@ unsafe extern "C" fn hpai_pcm_hw_params(
     }
 }
 
-kernel::of_device_table!(
-    OF_TABLE,
-    <SndSocT8140AopDriver as platform::Driver>::IdInfo,
-    [(of::DeviceId::new(c_str!("apple,t8140-aop-audio")), ())]
-);
-
-impl platform::Driver for SndSocT8140AopDriver {
-    type IdInfo = ();
-    type Data<'bound> = SndSocT8140AopDriver;
-
-    const OF_ID_TABLE: Option<of::IdTable<Self::IdInfo>> = Some(&OF_TABLE);
-
-    fn probe<'bound>(
-        pdev: &'bound platform::Device<Core<'_>>,
-        _info: Option<&'bound Self::IdInfo>,
-    ) -> impl PinInit<Self::Data<'bound>, Error> + 'bound {
+/// The T8140 backend of the AOP audio driver, selected by its compatible.
+impl SndSocT8140AopDriver {
+    pub(crate) fn probe(pdev: &platform::Device<Core<'_>>) -> Result<Self> {
         let dev = ARef::<device::Device>::from(pdev.as_ref());
         // SAFETY: this is a service device the AOP core registered, being
         // probed here; the lookup defers the probe until the core has
@@ -2918,16 +2901,9 @@ impl platform::Driver for SndSocT8140AopDriver {
         Self::new(data, fwnode)
     }
 
-    fn unbind(_dev: &platform::Device<Core<'_>>, this: Pin<&Self>) {
-        this.teardown();
+    pub(crate) fn unbind(&self) {
+        self.teardown();
     }
-}
-
-module_platform_driver! {
-    type: SndSocT8140AopDriver,
-    name: "snd_soc_t8140_aop_audio",
-    description: "Apple T8140 AOP audio: microphones, headphone jack and speakers",
-    license: "Dual MIT/GPL",
 }
 
 /// The speaker ceiling and the copy-path conversion are the whole digital
