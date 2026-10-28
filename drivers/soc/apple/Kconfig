@@ -229,8 +229,8 @@ config APPLE_CLPC
 
 	  Say 'y' or 'm' here if you have an Apple SoC with a PMC.
 
-config APPLE_T6030_DISPLAY_GATE
-	bool "Apple T6030 internal display enable gate"
+config APPLE_DISPLAY_GATE
+	bool "Apple internal display enable gate"
 	depends on ARCH_APPLE && OF_DYNAMIC && OF_OVERLAY
 	default ARCH_APPLE
 	help
@@ -278,7 +278,7 @@ config APPLE_T6041_DISPLAY_GATE
 
 config APPLE_T6030_GPU_PMP_LINK
 	bool
-	depends on APPLE_T6030_DISPLAY_GATE
+	depends on APPLE_DISPLAY_GATE
 	default n
 	help
 	  Link an opted-in T6030 GPU to the PMP admitted by the display gate.
@@ -287,7 +287,7 @@ config APPLE_T6030_GPU_PMP_LINK
 
 config APPLE_DISPLAY_GATE_KUNIT_TEST
 	bool "KUnit tests for the Apple display gate" if !KUNIT_ALL_TESTS
-	depends on KUNIT=y && APPLE_T6030_DISPLAY_GATE
+	depends on KUNIT=y && APPLE_DISPLAY_GATE
 	default KUNIT_ALL_TESTS
 	help
 	  Runs the display gate on test device trees with the T6030, T6031

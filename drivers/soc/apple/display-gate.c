@@ -1972,7 +1972,7 @@ static void __init gate_run(void)
 }
 
 /* Runs before of_platform_default_populate_init() at arch_initcall_sync. */
-static int __init apple_t6030_display_gate(void)
+static int __init apple_display_gate(void)
 {
 	int i;
 
@@ -1995,8 +1995,8 @@ static int __init apple_t6030_display_gate(void)
 	gate_run();
 	return 0;
 }
-arch_initcall(apple_t6030_display_gate);
+arch_initcall(apple_display_gate);
 
 #if IS_ENABLED(CONFIG_APPLE_DISPLAY_GATE_KUNIT_TEST)
-#include "t6030-display-gate-test.c"
+#include "display-gate-test.c"
 #endif
