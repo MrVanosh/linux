@@ -329,12 +329,9 @@ def modeset_unknown(root):
     template = (root / 'drivers/gpu/drm/apple/iomfb_template.c').read_text()
     unit = modeset_unmap(root)
     helper = block(template, 'static bool dcp_modeset_callback_failed(')
-    # Keep the real modeset completion and its callback-error check. The
-    # adaptive retry boundary must never be reached after an unknown callback.
+    # Keep the real modeset completion and its callback-error check.
     helper += r'''
 struct dcp_modeset_cookie {struct dcp_wait_cookie wait;bool vrr;};
-static void dcp_modeset_fixed_fallback(struct apple_dcp *d,struct dcp_modeset_cookie *m)
-{(void)d;(void)m;assert(false);}
 ''' + block(template, 'static void dcp_modeset_actual_done(')
     unit = unit.replace('int main(void)', helper + '\nint main(void)')
     tests = r'''

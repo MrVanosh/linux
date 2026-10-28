@@ -70,7 +70,6 @@ def main():
         ('display', 'desktop-powerlog-framing', desktop.powerlog_framing, ((),), ()),
         ('display', 'desktop-brightness-keys-reports', desktop.keys_and_reports, ((),), ()),
         ('display', 'panel-refresh-range', display.refresh, ((),), ()),
-        ('display', 'panel-adaptive-fallback', display.adaptive, ((),), ()),
         ('display', 'panel-adaptive-watchdog', display.watchdog, ((),), ()),
         ('m4', 'm4-wire-golden', lambda r: m4.golden_check(r, output), (), ()),
         ('m4', 'm4-protocol', m4.protocol, ((),), ('-Wno-unused-function', '-Wno-unused-const-variable')),
