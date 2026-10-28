@@ -4438,4 +4438,7 @@
 };
 /* Daily tree only: the private additions (t6040-j616s-m4.dtsi), applied last. */
 #include "t6040-j616s-m4.dtsi"
+/* Daily tree only: fit the M4 loader's board.dtb window; the tether variant keeps every node. */
+#ifndef J616S_TETHER
 #include "t6040-j616s-m4-trim.dtsi"
+#endif
