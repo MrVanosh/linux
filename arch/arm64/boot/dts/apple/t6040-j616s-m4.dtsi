@@ -394,3 +394,12 @@
 &smc_gpio {
 	phandle = <0x7c>;
 };
+
+/*
+ * aurora cf9ac970 points the GPU at its PMP report entry (pmp_gfx). The M4 loader's GPU fix-up (rev 19) expects the
+ * m4.103 layout: the GPU on ps_gfx and exactly one report entry on ps_gfx, which it makes always on; otherwise it
+ * disables the GPU (/chosen m4,gpu = "companions"). pmp_gfx stays always on here, as the loader sets it.
+ */
+&gpu {
+	power-domains = <&ps_gfx>;
+};
